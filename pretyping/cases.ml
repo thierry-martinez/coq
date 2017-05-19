@@ -1353,6 +1353,12 @@ let build_branch initial current realargs deps (realnames,curname) pb arsign eqn
 
 *)
 
+let postponed_build_inversion_problem : (Loc.t ->
+         Environ.env ->
+         Evd.evar_map ->
+         (EConstr.constr * tomatch_type) list ->
+         EConstr.types -> Evd.evar_map * EConstr.constr) ref = ref (fun x -> failwith "Unbound build_inversion_problem")
+
 (**********************************************************************)
 (* Main compiling descent *)
 let rec compile pb =
@@ -1382,6 +1388,18 @@ and match_current pb (initial,tomatch) =
 	if (not no_cstr || not (List.is_empty pb.mat)) && onlydflt then
 	  compile_all_variables initial tomatch pb
 	else
+          let pred =
+            (*try*)
+              let (evd, pred) =
+                !postponed_build_inversion_problem pb.caseloc pb.env !(pb.evdref) [(current, typ)] pb.pred in
+              pb.evdref := evd;
+              pred
+                (*
+            with _ ->
+              pb.pred *) in
+
+          let pb = { pb with pred } in
+
 	  (* We generalize over terms depending on current term to match *)
 	  let pb,deps = generalize_problem (names,dep) pb deps in
 
@@ -1835,6 +1853,9 @@ let build_inversion_problem loc env sigma tms t =
       typing_function = build_tycon loc env pb_env s subst} in
   let pred = (compile pb).uj_val in
   (!evdref,pred)
+
+let () =
+  postponed_build_inversion_problem := build_inversion_problem
 
 (* Here, [pred] is assumed to be in the context built from all *)
 (* realargs and terms to match *)
