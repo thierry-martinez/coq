@@ -105,10 +105,14 @@ module Phantom3 (Type : TypeS) : sig
   type ('a, 'b, 'c) t
 
   val eq : (('a, 'b, 'c) t, Type.t) Eq.t
+
+  val transtype : (('a, 'b, 'c) t, ('d, 'e, 'f) t) Eq.t
 end = struct
   type ('a, 'b, 'c) t = Type.t
 
   let eq = Eq.Refl
+
+  let transtype = Eq.Refl
 end
 
 module type UnaryTypeS = sig
@@ -121,12 +125,17 @@ module PhantomPoly (Type : UnaryTypeS) : sig
   val eq : (('a, 'b) t, 'a Type.t) Eq.t
 
   val transtype : (('a, 'b) t, ('a, 'c) t) Eq.t
+
+  val morphism : ('a, 'b) Eq.t -> (('a, 'c) t, ('b, 'c) t) Eq.t
 end = struct
   type ('a, 'b) t = 'a Type.t
 
   let eq = Eq.Refl
 
   let transtype = Eq.Refl
+
+  let morphism : type a b c . (a, b) Eq.t -> ((a, c) t, (b, c) t) Eq.t =
+    fun Refl -> Refl
 end
 
 module Nat = struct
@@ -192,6 +201,29 @@ module Nat = struct
     | Succ_plus plus -> plus_succ (plus_commut b plus)
 end
 
+module Rank = struct
+  type 'upper t =
+    | O : _ t
+    | S : 'a t -> 'a Nat.succ t
+end
+
+module Diff = struct
+  type 'a t =
+    Exists : ('x, 'y Nat.succ, 'a) Nat.plus -> 'a t
+
+  let rec to_nat : type a b c . (a, b, c) Nat.plus -> a Nat.t = fun plus ->
+    match plus with
+    | Zero_l -> O
+    | Succ_plus plus -> S (to_nat plus)
+
+  let move_succ_left : type a b c .
+    a Nat.t -> b Nat.t -> (a, b Nat.succ, c) Nat.plus ->
+      (a Nat.succ, b, c) Nat.plus =
+  fun a b plus ->
+    let Succ_plus plus' = Nat.plus_commut (S b) plus in
+    Nat.plus_commut (S a) (Nat.plus_succ plus')
+end
+
 module Vector = struct
   type ('a, 'length) t =
     | [] : ('a, Nat.zero) t
@@ -205,6 +237,18 @@ module Vector = struct
     | hd :: tl ->
         let Exists tl = of_list tl in
         Exists (hd :: tl)
+
+  let rec of_list_map : type a b . (a -> b) -> a list -> b exists = fun f l ->
+    match l with
+    | [] -> Exists []
+    | hd :: tl ->
+        let Exists tl = of_list_map f tl in
+        Exists (f hd :: tl)
+
+  let rec to_list : type a length . (a, length) t -> a list = fun l ->
+    match l with
+    | [] -> []
+    | hd :: tl -> hd :: to_list tl
 
   let rec length : type a length . (a, length) t -> length Nat.t = fun l ->
     match l with
@@ -225,6 +269,14 @@ module Vector = struct
         if p hd then hd
         else find p tl
 
+  let rec iter : type length . ('a -> unit) -> ('a, length) t -> unit =
+  fun f l ->
+    match l with
+    | [] -> ()
+    | hd :: tl ->
+        f hd;
+        iter f tl
+
   let rec map : type length . ('a -> 'b) -> ('a, length) t -> ('b, length) t =
   fun f l ->
     match l with
@@ -238,6 +290,16 @@ module Vector = struct
     | [], [] -> []
     | hd1 :: tl1, hd2 :: tl2 -> f hd1 hd2 :: map2 f tl1 tl2
 
+  let rec map_split : type length .
+    ('a -> 'b * 'c) -> ('a, length) t -> ('b, length) t * ('c, length) t =
+  fun f l ->
+    match l with
+    | [] -> [], []
+    | hd :: tl ->
+        let hd0, hd1 = f hd in
+        let tl0, tl1 = map_split f tl in
+        hd0 :: tl0, hd1 :: tl1
+
   let rec map_rev_append : type l l0 l1 .
         ('a -> 'b) -> ('a, l0) t -> ('b, l1) t -> (l0, l1, l) Nat.plus ->
         ('b, l) t = fun f l0 l1 plus ->
@@ -245,21 +307,54 @@ module Vector = struct
     | [], Zero_l -> l1
     | hd :: tl, Succ_plus plus ->
         map_rev_append f tl (f hd :: l1) (Nat.plus_succ plus)
+
+  let rec mapi_aux :
+  type i l l' . i Nat.t -> l' Nat.t -> (i, l', l) Nat.plus ->
+    (l Diff.t -> 'a -> 'b) -> ('a, l') t -> ('b, l') t =
+  fun i l' diff f l ->
+    match l, l' with
+    | [], O -> []
+    | hd :: tl, S l' ->
+       f (Exists diff) hd :: mapi_aux (S i) l'
+         (Diff.move_succ_left i l' diff) f tl
+
+  let mapi : type l . (l Diff.t -> 'a -> 'b) -> ('a, l) t -> ('b, l) t =
+  fun f l ->
+    mapi_aux O (length l) Zero_l f l
+
+  let rec get_aux : type i l l' .
+    (i, l' Nat.succ, l) Nat.plus -> ('a, l) t -> 'a =
+  fun plus l ->
+    match plus, l with
+    | Zero_l, hd :: _ -> hd
+    | Succ_plus plus, _ :: tl ->
+        get_aux plus tl
+    | _ -> .
+
+  let get : type l . l Diff.t -> ('a, l) t -> 'a =
+  fun (Exists plus) l ->
+    get_aux plus l
+
+  let rec for_all : type length . ('a -> bool) -> ('a, length) t -> bool =
+  fun p l ->
+    match l with
+    | [] -> true
+    | hd :: tl -> p hd && for_all p tl
 end
 
 module type Monad = sig
-   type 'a t
+   type ('a, 'p) t
 
    module Ops : sig
-     val return : 'a -> 'a t
+     val return : 'a -> ('a, 'p) t
 
-     val (let*) : 'a t -> ('a -> 'b t) -> 'b t
+     val (let*) : ('a, 'p) t -> ('a -> ('b, 'p) t) -> ('b, 'p) t
    end
 end
 
 module MonadUtils (M : Monad) = struct
-  let rec list_map : type a b .
-        (a -> b M.t) -> a list -> b list M.t =
+  let rec list_map : type a b p .
+        (a -> (b, p) M.t) -> a list -> (b list, p) M.t =
     fun f l ->
       let open M.Ops in
       match l with
@@ -269,8 +364,9 @@ module MonadUtils (M : Monad) = struct
           let* t' = list_map f t in
           return (h' :: t')
 
-  let rec vector_map : type length a b .
-        (a -> b M.t) -> (a, length) Vector.t -> (b, length) Vector.t M.t =
+  let rec vector_map : type length a b p .
+        (a -> (b, p) M.t) -> (a, length) Vector.t ->
+          ((b, length) Vector.t, p) M.t =
     fun f v ->
       let open M.Ops in
       let open Vector in
@@ -281,8 +377,8 @@ module MonadUtils (M : Monad) = struct
           let* t' = vector_map f t in
           return (h' :: t')
 
-  let option_map : type state a b .
-        (a -> b M.t) -> a option -> b option M.t =
+  let option_map : type state a b p .
+        (a -> (b, p) M.t) -> a option -> (b option, p) M.t =
     fun f o ->
       let open M.Ops in
       match o with
@@ -294,7 +390,7 @@ end
 
 module OptionMonad = struct
   module Self = struct
-    type 'a t = 'a option
+    type ('a, _) t = 'a option
 
     module Ops = struct
       let return x = Some x
@@ -312,9 +408,9 @@ module type Type = sig
   type t
 end
 
-module StateMonad (State : Type) = struct
+module StateMonad = struct
   module Self = struct
-    type 'a t = State.t -> State.t * 'a
+    type ('a, 'state) t = 'state -> 'state * 'a
 
     module Ops = struct
      let return x sigma =
@@ -328,14 +424,19 @@ module StateMonad (State : Type) = struct
 
   include Self
 
-  let get : State.t t =
+  let get : type state . (state, state) t =
     fun state -> (state, state)
 
-  let eq : type a b . (a, b) Eq.t -> (a t, b t) Eq.t =
+  let set : type state . state -> (unit, state) t =
+    fun new_state state -> (new_state, ())
+
+  let run : type state a . state -> (a, state) t -> state * a =
+    fun state m -> m state
+
+  let eq : type a b . (a, b) Eq.t -> ((a, 'p) t, (b, 'p) t) Eq.t =
     fun Refl -> Refl
 
-
-  let array_init : type a . int -> (int -> a t) -> a array t =
+  let array_init : type a p . int -> (int -> (a, p) t) -> (a array, p) t =
   fun len f state ->
      let state_ref = ref state in
      let result =
@@ -493,7 +594,9 @@ module ETerm = struct
 end
 
 module EvarMapMonad = struct
-  include StateMonad (struct type t = Evd.evar_map end)
+  include StateMonad
+
+  type 'a t = ('a, Evd.evar_map) StateMonad.t
 
   let new_type_evar (env : 'env Env.t) rigid : ('env ETerm.t * Sorts.t) t =
   fun sigma ->
@@ -535,6 +638,10 @@ module Judgment = struct
         Eq.cast (Eq.sym eq) {
           uj_val = Eq.cast (Eq.arrow ETerm.eq ETerm.eq) f uj_val;
           uj_type = Eq.cast (Eq.arrow ETerm.eq ETerm.eq) f uj_type; }
+
+  let make (type env) (uj_val : env ETerm.t) (uj_type : env ETerm.t) : env t =
+    Eq.cast (Eq.sym Eq.(ETerm.eq ^-> ETerm.eq ^-> eq))
+      Environ.make_judge uj_val uj_type
 end
 
 module Declaration = struct
@@ -661,6 +768,9 @@ module Tuple = struct
       f (Eq.cast (Eq.sym Index.eq) i)
     done
 
+  let map (f : ('a -> 'b)) (t : ('a, 'length) t) : ('b, 'length) t =
+    Eq.(cast (sym (Refl ^-> eq ^-> eq))) Array.map f t
+
   type 'a exists = Exists : ('a, 'length) t -> 'a exists
 end
 
@@ -673,16 +783,12 @@ module InductiveSpecif = struct
       Inductive.lookup_mind_specif env ind
 
   let constructors (type env ind) (specif : (env, ind) t) :
-      (env Term.t) Tuple.exists =
-    Exists (Eq.cast (Eq.trans (Eq.array (Eq.sym (Term.eq))) (Eq.sym Tuple.eq))
-      (snd (Eq.cast eq specif)).mind_user_lc)
+      (env Term.t, ind) Tuple.t =
+    Eq.cast (Eq.trans (Eq.array (Eq.sym (Term.eq))) (Eq.sym Tuple.eq))
+      (snd (Eq.cast eq specif)).mind_user_lc
 end
 
-module type AnnotatedS = sig
-  type 'annot t
-end
-
-module AnnotatedVector (S : AnnotatedS) = struct
+module AnnotatedVector (S : UnaryTypeS) = struct
   type 'annot t =
     | [] : unit t
     | (::) : 'head S.t * 'tail t -> ('head * 'tail) t
@@ -745,10 +851,10 @@ module InductiveFamily = struct
     Inductiveops.make_ind_family (ind, params)
 
   let to_inductive (type env ind arity) (indf : (env, ind, arity) t) :
-      ind InductiveDef.t =
-    let (ind, _univ), _params =
+      ind InductiveDef.t Univ.puniverses =
+    let (ind, univ), _params =
       Inductiveops.dest_ind_family (Eq.cast eq indf) in
-    Eq.cast (Eq.sym InductiveDef.eq) ind
+    (Eq.cast (Eq.sym InductiveDef.eq) ind, univ)
 
   let map (type ind arity a b) (f : a Term.t -> b Term.t)
       (indf : (a, ind, arity) t) : (b, ind, arity) t =
@@ -772,49 +878,46 @@ module ConstructorSummary = struct
 end
 
 module InductiveType = struct
-  include Phantom2 (struct type t = Inductiveops.inductive_type end)
+  type ('env, 'ind, 'realargs) t = {
+      family : ('env, 'ind, 'realargs) InductiveFamily.t;
+      realargs : ('env ETerm.t, 'realargs) Vector.t;
+    }
 
-  type 'env exists = Exists : ('env, 'ind) t -> 'env exists
+  type 'env exists = Exists : ('env, 'ind, 'realargs) t -> 'env exists
 
-  let of_term_opt (type env) (env : env Env.t) (sigma : Evd.evar_map)
-      (term : env ETerm.t) : env exists option =
+  type ('env, 'ind) exists_ind =
+      Exists : ('env, 'ind, 'realargs) t -> ('env, 'ind) exists_ind
+
+  let of_inductive_type (type env ind)
+      (ind_type : Inductiveops.inductive_type) :
+      (env, ind) exists_ind =
+    let family, realargs = Inductiveops.dest_ind_type ind_type in
+    let Exists realargs =
+      Vector.of_list (Eq.cast (Eq.list (Eq.sym ETerm.eq)) realargs) in
+    Exists { family = Eq.cast (Eq.sym InductiveFamily.eq) family; realargs }
+
+  let to_inductive_type (type env ind realargs)
+      (indt : (env, ind, realargs) t) : Inductiveops.inductive_type =
+    Eq.(cast (sym ((InductiveFamily.eq ^* Eq.list ETerm.eq) ^-> Refl)))
+      Inductiveops.make_ind_type (indt.family, Vector.to_list indt.realargs)
+
+  let of_term_opt (type env ind) (env : env Env.t) (sigma : Evd.evar_map)
+      (term : env ETerm.t) : (env, ind) exists_ind option =
     match
        Inductiveops.find_rectype (Eq.cast Env.eq env) sigma
         (Eq.cast ETerm.eq term)
     with
     | exception Not_found -> None
-    | ind -> Some (Exists (Eq.cast (Eq.sym eq) ind))
+    | ind -> Some (of_inductive_type ind)
 
-  let destruct (type env ind) (ind_type : (env, ind) t) :
-      (env, ind) InductiveFamily.exists * env ETerm.t list =
-    let indf, real_args = Inductiveops.dest_ind_type (Eq.cast eq ind_type) in
-    Exists (Eq.cast (Eq.sym InductiveFamily.eq) indf),
-    Eq.cast (Eq.list (Eq.sym ETerm.eq)) real_args
-
-  let construct (type env ind arity)
-      (indf : (env, ind, arity) InductiveFamily.t)
-      (real_args : env ETerm.t list) : (env, ind) t =
-    Eq.cast (Eq.sym eq)
-      (Inductiveops.make_ind_type
-        (Eq.cast InductiveFamily.eq indf, Eq.cast (Eq.list ETerm.eq) real_args))
-
-  let to_inductive_family (type env ind) (ind_type : (env, ind) t) :
-      (env, ind) InductiveFamily.exists =
-    let indf, _real_args = Inductiveops.dest_ind_type (Eq.cast eq ind_type) in
-    Exists (Eq.cast (Eq.sym InductiveFamily.eq) indf)
-
-  let to_real_args (type env ind) (ind_type : (env, ind) t) : env ETerm.t list =
-    let _indf, real_args = Inductiveops.dest_ind_type (Eq.cast eq ind_type) in
-    Eq.cast (Eq.list (Eq.sym ETerm.eq)) real_args
-
-  let map (type ind a b) (f : a Term.t -> b Term.t)
-      (ef : a ETerm.t -> b ETerm.t) (ind_type : (a, ind) t) :
-      (b, ind) t =
-    let Exists indf, real_args = destruct ind_type in
-    construct (InductiveFamily.map f indf) (List.map ef real_args)
+  let map (type ind realargs a b) (f : a Term.t -> b Term.t)
+      (ef : a ETerm.t -> b ETerm.t) (ind_type : (a, ind, realargs) t) :
+      (b, ind, realargs) t =
+    { family = InductiveFamily.map f ind_type.family;
+      realargs = Vector.map ef ind_type.realargs }
 
   let make_with_evars (type env ind) (env : env Env.t)
-      (ind : ind InductiveDef.t) : (env, ind) t EvarMapMonad.t =
+      (ind : ind InductiveDef.t) : (env, ind) exists_ind EvarMapMonad.t =
     let open EvarMapMonad.Ops in
     let nb_args =
       Inductiveops.inductive_nallargs (Eq.cast Env.eq env)
@@ -823,9 +926,31 @@ module InductiveType = struct
       let* (e, _) = EvarMapMonad.new_type_evar env Evd.univ_flexible_alg in
       EvarMapMonad.new_evar env e) in
     let* sigma = EvarMapMonad.get in
-    return (Eq.cast (Eq.sym eq)
-      (Inductiveops.find_rectype (Eq.cast Env.eq env) sigma
-        (Eq.cast ETerm.eq (ETerm.mkApp (ETerm.mkInd ind) args))))
+    match of_term_opt env sigma (ETerm.mkApp (ETerm.mkInd ind) args) with
+    | None -> assert false
+    | Some (Exists ind) ->
+        return (Exists ind)
+
+  let make_case_or_project (type env ind realargs) (env : env Env.t)
+    (sigma : Evd.evar_map) (indt : (env, ind, realargs) t)
+    (style : Constr.case_style) ~(return_pred : env ETerm.t)
+    ~(tomatch : env ETerm.t) (branches : (env ETerm.t, ind) Tuple.t) :
+      env ETerm.t =
+    let mind = InductiveFamily.to_inductive indt.family in
+    let rci =
+      Eq.cast (Eq.sym Eq.(Env.eq ^-> Refl ^-> (InductiveDef.eq ^* Refl) ^->
+        ETerm.eq ^-> ETerm.eq ^-> Refl))
+      Typing.check_allowed_sort env sigma mind tomatch return_pred in
+    let ci =
+      Eq.cast (Eq.sym Eq.(Env.eq ^-> InductiveDef.eq ^-> Refl))
+      Inductiveops.make_case_info env (fst mind) rci style in
+    let indt = to_inductive_type indt in
+    Eq.cast (Eq.sym Eq.(
+      Env.eq ^-> Refl ^-> Refl ^-> Refl ^-> ETerm.eq ^-> ETerm.eq ^->
+        Eq.trans Tuple.eq (Eq.array ETerm.eq) ^->
+        ETerm.eq))
+    Inductiveops.make_case_or_project env sigma indt ci return_pred
+      tomatch branches
 end
 
 module AnnotLength = struct
@@ -853,6 +978,39 @@ module MeasurableVector (S : MeasurableS) = struct
     match v with
     | [] -> Height.zero
     | hd :: tl -> Height.add (S.height hd) (height tl)
+
+  type ('env, 'annot, 'height) vector = ('env, 'annot, 'height) t
+
+        (*
+  let rec get_aux : type i annot height l' l .
+    (i, l' Nat.succ, l) Nat.plus -> ('env, annot, height) t ->
+      (annot, l) AnnotLength.t -> 'a =
+  fun plus l len ->
+    match plus, l, len with
+    | Zero_l, hd :: _, _ -> hd
+    | Succ_plus plus, _ :: tl, S len ->
+        get_aux plus tl len
+    | _ -> .
+
+  let get : type l . l Diff.t -> ('a, l) t -> 'a =
+  fun (Exists plus) l ->
+    get_aux plus l
+          *)
+  module type ProjS = sig
+    module Type : UnaryTypeS
+
+    val proj : ('env, 'annot, 'height) S.t -> 'annot Type.t
+  end
+
+  module Proj (Item : ProjS) = struct
+    module Vector = AnnotatedVector (Item.Type)
+
+    let rec proj : type env annot height .
+          (env, annot, height) t -> annot Vector.t = fun v ->
+      match v with
+      | [] -> []
+      | hd :: tl -> Item.proj hd :: proj tl
+  end
 end
 
 module MeasurableVectorMap (S0 : MeasurableS) (S1 : MeasurableS) = struct
@@ -882,36 +1040,59 @@ module CasesPattern = struct
     | Cstr : {
       cstr : ('ind, 'arity) Constructor.t;
       args : (Glob_term.cases_pattern, 'arity) Vector.t;
-    } -> 'ind desc
+    } -> 'ind known desc
 
   type 'ind content = {
       name : Names.Name.t;
       desc : 'ind desc;
     }
 
-  type 'ind t = 'ind content CAst.t
+  type 'ind t = ('ind content, [`any]) DAst.t
 
   let get_var (type ind) (pat : ind t) : Names.Name.t option =
-    match pat.v.desc with
-    | Var -> Some pat.v.name
+    let pat = DAst.get pat in
+    match pat.desc with
+    | Var -> Some pat.name
     | _ -> None
 
   let get_name (type ind) (pat : ind t) : Names.Name.t =
-    pat.v.name
+    (DAst.get pat).name
 
   let of_var (type ind) (name : (Names.Name.t, [`any]) DAst.t) : ind t =
-    Eq.cast (Eq.sym eq) (DAst.map (fun name -> Glob_term.PatVar name) name)
+    DAst.map (fun name -> { name; desc = Var }) name
+
+  let unsafe_of_cstr (type ind) (pat : (_, [`any]) DAst.t) : ind known t =
+    pat |> DAst.map (fun (cstr, args, alias) ->
+      let Exists args = Vector.of_list args in
+        { name = alias;
+          desc = Cstr {
+            cstr = Eq.cast (Eq.sym Constructor.eq) cstr;
+            args }})
+
+  let to_pat (pat : _ t) : Glob_term.cases_pattern =
+    pat |> DAst.map (fun pat ->
+      match pat.desc with
+      | Var -> Glob_term.PatVar pat.name
+      | Cstr { cstr; args } ->
+          PatCstr (Eq.cast Constructor.eq cstr, Vector.to_list args, pat.name))
 
   type 'item inferred =
     | Unknown : unknown inferred
     | Known : 'ind InductiveDef.t -> 'ind known inferred
 
+  let get_cstr (pat : Glob_term.cases_pattern) =
+    pat |> DAst.map (function
+      | Glob_term.PatVar _ -> assert false
+      | PatCstr (cstr, args, alias) -> (cstr, args, alias))
+
   let coerce_to ?loc (env : 'env Env.t) (pat : 'ind known t)
       ~(pat_ind : 'ind InductiveDef.t) ~(tgt_ind : 'ind' InductiveDef.t) :
       'ind' known t =
-    Eq.cast (Eq.sym (Eq.arrow (Env.eq) (Eq.arrow eq (Eq.arrow InductiveDef.eq
-      (Eq.arrow InductiveDef.eq eq)))))
-      (Coercion.inh_pattern_coerce_to ?loc) env pat pat_ind tgt_ind
+    unsafe_of_cstr (get_cstr
+      (Eq.cast (Eq.sym (Eq.arrow (Env.eq) (Eq.arrow Refl
+        (Eq.arrow InductiveDef.eq (Eq.arrow InductiveDef.eq Refl)))))
+          (Coercion.inh_pattern_coerce_to ?loc) env (to_pat pat) pat_ind
+            tgt_ind))
 end
 
 module CasesPatterns = AnnotatedVector (CasesPattern)
@@ -920,8 +1101,8 @@ module Tomatch = struct
   type ('env, 'ind, 'height) inductive_type =
     | None : ('env, CasesPattern.unknown, Nat.zero) inductive_type
     | Some :
-        ('env, 'ind) InductiveType.t ->
-          ('env, 'ind CasesPattern.known, 'height) inductive_type
+        ('env, 'ind, 'realargs) InductiveType.t ->
+          ('env, 'ind CasesPattern.known, 'realargs Nat.succ) inductive_type
 
   type ('env, 'ind, 'height) t = {
       judgment : 'env Judgment.t;
@@ -930,6 +1111,13 @@ module Tomatch = struct
     }
 
   let height t = t.return_pred_height
+
+  let args (type env ind height) (tomatch : (env, ind, height) t) :
+      (env ETerm.t, height) Vector.t =
+    match tomatch.inductive_type with
+    | None -> []
+    | Some inductive_type ->
+        Judgment.uj_val tomatch.judgment :: inductive_type.realargs
 
   let map (type a b ind length)
       (f : a Term.t -> b Term.t) (ef : a ETerm.t -> b ETerm.t)
@@ -949,6 +1137,33 @@ module TomatchVector = struct
   include MeasurableVectorMap (Tomatch) (Tomatch)
 end
 
+module Rhs = struct
+  type 'env t =
+    | Glob_constr of Glob_term.glob_constr
+    | Judgment of 'env Judgment.t
+
+  let map f rhs =
+    match rhs with
+    | Glob_constr c -> Glob_constr c
+    | Judgment j -> Judgment (Judgment.map f j)
+end
+
+module Clause = struct
+  type ('env, 'tomatch_ind) desc = {
+      env : 'env GlobalEnv.t;
+      ids : Names.Id.Set.t;
+      pats : 'tomatch_ind CasesPatterns.t;
+      rhs : 'env Rhs.t;
+    }
+
+  type ('env, 'tomatch_ind) t = ('env, 'tomatch_ind) desc CAst.t
+
+  let extract_pat_var (type env head tail)
+      (clause : (env, head * tail) t) : Names.Name.t option =
+    match clause.v.pats with
+    | head :: _ -> CasesPattern.get_var head
+end
+
 module PrepareTomatch (EqnLength : Type) = struct
   module TomatchWithContext = struct
     type ('env, 'ind, 'height) t = {
@@ -965,7 +1180,7 @@ module PrepareTomatch (EqnLength : Type) = struct
     type ('env, 'item) inferred =
       | Unknown : ('env, CasesPattern.unknown) inferred
       | Known :
-          ('env, 'ind) InductiveType.t ->
+          ('env, 'ind, 'realargs) InductiveType.t ->
             ('env, 'ind CasesPattern.known) inferred
 
     type 'env infer_type =
@@ -974,10 +1189,10 @@ module PrepareTomatch (EqnLength : Type) = struct
           ('ind CasesPattern.t, EqnLength.t) Vector.t ->
             'env infer_type
 
-    let rec check : type env ind pat_length accu_length .
+    let rec check : type env ind realargs pat_length accu_length .
           env Env.t ->
           (pat_length, accu_length, EqnLength.t) Nat.plus ->
-          (env, ind) InductiveType.t ->
+          (env, ind, realargs) InductiveType.t ->
           (Glob_term.cases_pattern, pat_length) Vector.t ->
           (ind CasesPattern.known CasesPattern.t, accu_length) Vector.t ->
           env infer_type = fun env plus ind_type pats accu ->
@@ -990,24 +1205,25 @@ module PrepareTomatch (EqnLength : Type) = struct
           match DAst.get hd with
           | PatVar name ->
               check env (Nat.plus_succ plus) ind_type tl
-                (Eq.cast (Eq.sym CasesPattern.eq) hd :: accu)
+                (CasesPattern.of_var (hd |> DAst.map (fun _ -> name)) :: accu)
           | PatCstr (cstr, args, alias) ->
-              let Exists indf = InductiveType.to_inductive_family ind_type in
-              let ind = InductiveFamily.to_inductive indf in
-              let Exists cstr = Constructor.of_constructor cstr in
-              let ind' = Constructor.to_inductive cstr in
+              let ind, _ = InductiveFamily.to_inductive ind_type.family in
+              let Exists cstr' = Constructor.of_constructor cstr in
+              let ind' = Constructor.inductive cstr' in
+              let pat () =
+                CasesPattern.unsafe_of_cstr
+                  (hd |> DAst.map (fun _ -> (cstr, args, alias))) in
               let pat =
                 match InductiveDef.equal ind ind' with
                 | Some Refl ->
-                    Eq.cast (Eq.sym CasesPattern.eq) hd
+                    pat ()
                 | None ->
                     let loc = hd.CAst.loc in
                     try
-                      CasesPattern.coerce_to ?loc env
-                        (Eq.cast (Eq.sym CasesPattern.eq) hd) ~pat_ind:ind'
+                      CasesPattern.coerce_to ?loc env (pat ()) ~pat_ind:ind'
                         ~tgt_ind:ind
                     with Not_found ->
-                      Constructor.error_bad ?loc:hd.CAst.loc env cstr ind in
+                      Constructor.error_bad ?loc:hd.CAst.loc env cstr' ind in
               check env (Nat.plus_succ plus) ind_type tl (pat :: accu)
 
     let rec infer : type pat_length var_length .
@@ -1030,14 +1246,15 @@ module PrepareTomatch (EqnLength : Type) = struct
               infer env (Nat.plus_succ plus) tl
                 (DAst.map (fun _ -> name) hd :: vars)
           | PatCstr (cstr, args, alias) ->
-              let Exists cstr = Constructor.of_constructor cstr in
-              let ind = Constructor.to_inductive cstr in
+              let Exists cstr' = Constructor.of_constructor cstr in
+              let ind = Constructor.inductive cstr' in
               let vars_pat =
                 Vector.map_rev_append CasesPattern.of_var vars []
                   (Nat.zero_r (Vector.length vars)) in
-              let* ind_type = InductiveType.make_with_evars env ind in
+              let* Exists ind_type = InductiveType.make_with_evars env ind in
+              let pat = hd |> DAst.map (fun _ -> (cstr, args, alias)) in
               return (check env (Nat.plus_succ plus) ind_type tl
-                (Eq.cast (Eq.sym CasesPattern.eq) hd :: vars_pat))
+                (CasesPattern.unsafe_of_cstr pat :: vars_pat))
 
     let infer_type  (type env) (env : env Env.t)
         (sigma : Evd.evar_map) (judgment : env Judgment.t)
@@ -1072,10 +1289,11 @@ module PrepareTomatch (EqnLength : Type) = struct
             pats;
           })
       | Known inductive_type ->
-          let Exists indf = InductiveType.to_inductive_family inductive_type in
-          let arity = InductiveFamily.get_arity env indf in
+          let arity = InductiveFamily.get_arity env inductive_type.family in
           let as_name, in_names = predicate_pattern in
-          let ty = InductiveFamily.build_dependent_inductive env indf in
+          let ty =
+            InductiveFamily.build_dependent_inductive env
+              inductive_type.family in
           let return_pred_context =
             RelContext.add (Declaration.assum
               (Context.make_annot as_name Relevant) ty) arity in
@@ -1100,6 +1318,21 @@ module PrepareTomatch (EqnLength : Type) = struct
         MeasurableVectorMap (TomatchWithContext)
           (Tomatch) in
       Map.map { f = fun tomatch -> tomatch.tomatch } v
+
+    let to_clauses (env : 'env GlobalEnv.t)
+        (clauses : (Glob_term.cases_clause, EqnLength.t) Vector.t)
+        (v : ('env, 'ind, 'height) t) :
+        (('env, 'ind) Clause.t, EqnLength.t) Vector.t =
+      clauses |> Vector.mapi (fun index clause ->
+        clause |> CAst.map (fun (ids, pats, rhs) : ('env, 'ind) Clause.desc ->
+          let module P = Proj (struct
+            module Type = CasesPattern
+
+            let proj (v : ('env, 'annot, 'height) TomatchWithContext.t) =
+              Vector.get index v.pats
+          end) in
+          let pats = P.proj v in
+          { env; ids = Names.Id.Set.of_list ids; pats; rhs = Glob_constr rhs }))
 
     let rec make_return_pred_context :
     type env annot return_pred_height .
@@ -1131,33 +1364,6 @@ module PrepareTomatch (EqnLength : Type) = struct
           let Exists (tl, len) = of_vector tl in
           Exists (hd :: tl, S len)
   end
-end
-
-module Rhs = struct
-  type 'env t =
-    | Glob_constr of Glob_term.glob_constr
-    | Judgment of 'env Judgment.t
-
-  let map f rhs =
-    match rhs with
-    | Glob_constr c -> Glob_constr c
-    | Judgment j -> Judgment (Judgment.map f j)
-end
-
-module Clause = struct
-  type ('env, 'tomatch_ind) desc = {
-      env : 'env GlobalEnv.t;
-      ids : Names.Id.Set.t;
-      pats : 'tomatch_ind CasesPatterns.t;
-      rhs : 'env Rhs.t;
-    }
-
-  type ('env, 'tomatch_ind) t = ('env, 'tomatch_ind) desc CAst.t
-
-  let extract_pat_var (type env head tail)
-      (clause : (env, head * tail) t) : Names.Name.t option =
-    match clause.v.pats with
-    | head :: _ -> CasesPattern.get_var head
 end
 
 module ReturnPred = struct
@@ -1212,7 +1418,7 @@ module type CompilerS = sig
       ?tycon:'env ETerm.t -> Constr.case_style -> 'env GlobalEnv.t ->
       Glob_term.glob_constr option ->
       Glob_term.tomatch_tuple list ->
-      Glob_term.cases_clause list ->
+      (Glob_term.cases_clause, 'eqns_length) Vector.t ->
       'env Judgment.t EvarMapMonad.t
 
   val compile_loop :
@@ -1267,7 +1473,7 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
 
   let compile_base (type env)
       (problem :
-         (env, Nat.zero, _ Nat.succ, Nat.zero) PatternMatchingProblem.t) :
+         (env, unit, _ Nat.succ, Nat.zero) PatternMatchingProblem.t) :
       env Judgment.t EvarMapMonad.t =
     let open EvarMapMonad.Ops in
     let env, rhs =
@@ -1374,38 +1580,75 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
       (Judgment.map (ETerm.subst1 (Judgment.uj_val tomatch.judgment)) judgment)
 
   let compile_destruct
+      (type env ind realargs ind_tail eqns_length return_pred_height
+        tail_height)
+      (tomatch : (env, ind CasesPattern.known, return_pred_height) Tomatch.t)
+      (ind : (env, ind, realargs) InductiveType.t)
+      (tomatches : (env, ind_tail, tail_height) TomatchVector.t)
+      (problem :
+         (env, ind CasesPattern.known * ind_tail, eqns_length,
+           return_pred_height * tail_height) PatternMatchingProblem.t) :
+      env Judgment.t EvarMapMonad.t =
+    let specif =
+      InductiveSpecif.lookup (GlobalEnv.env problem.env)
+        (fst (InductiveFamily.to_inductive ind.family)) in
+    let constructors = InductiveSpecif.constructors specif in
+    let nb_cstr = Tuple.length constructors in
+    let branches = Tuple.make nb_cstr [] in
+    let add_eqn (clause : (env, ind CasesPattern.known * ind_tail) Clause.t) =
+      let open Tuple.Ops in
+      let pat :: tail = clause.v.pats in
+      let clause = clause |> CAst.map (
+        fun (desc : (env, ind CasesPattern.known * ind_tail) Clause.desc) ->
+          { desc with pats = tail }) in
+      match (DAst.get pat).desc with
+      | Var ->
+          Tuple.iter branches (fun i ->
+            branches.%(i) <- clause :: branches.%(i))
+      | Cstr { cstr; args } ->
+          let i = Constructor.index cstr in
+          branches.%(i) <- clause :: branches.%(i) in
+    Vector.iter add_eqn problem.eqns;
+    let open EvarMapMonad.Ops in
+    let* sigma = EvarMapMonad.get in
+    let* return_pred =
+      match problem.return_pred with
+      | ReturnPred return_pred ->
+          failwith "Not implemented"
+      | Tycon None ->
+          let* ty, _ =
+            EvarMapMonad.new_type_evar (GlobalEnv.env problem.env)
+              Evd.univ_flexible_alg in
+          return ty
+      | Tycon (Some tycon) ->
+          return tycon in
+    let branches =
+      branches |> Tuple.map (
+      fun (clauses : (env, ind_tail) Clause.t list) ->
+        let env = problem.env in
+        let Exists eqns = Vector.of_list (List.rev clauses) in
+        let sub_problem = {
+          PatternMatchingProblem.env = env;
+          tomatches;
+          eqns;
+          return_pred = problem.return_pred } in
+        MatchContext.compile_loop sub_problem) in
+    let case =
+      InductiveType.make_case_or_project (GlobalEnv.env problem.env) sigma ind
+        MatchContext.style ~tomatch:(Judgment.uj_val tomatch.judgment)
+        ~return_pred branches in
+    return (Judgment.make case case_type)
+    (*
+    MatchContext.compile_loop
+    failwith "Not implemented"
+
+      *)
+  let compile_case
       (type env ind ind_tail eqns_length return_pred_height tail_height)
       (tomatch : (env, ind, return_pred_height) Tomatch.t)
-      (ind : (env, ind) InductiveType.t)
       (tomatches : (env, ind_tail, tail_height) TomatchVector.t)
       (problem :
          (env, ind * ind_tail, eqns_length,
-           return_pred_height * tail_height) PatternMatchingProblem.t) :
-      env Judgment.t EvarMapMonad.t =
-    let Exists family = InductiveType.to_inductive_family ind in
-    let specif =
-      InductiveSpecif.lookup (GlobalEnv.env problem.env)
-        (InductiveFamily.to_inductive family) in
-    let Exists constructors = InductiveSpecif.constructors specif in
-    let nb_cstr = Tuple.length constructors in
-    let branches = Tuple.make nb_cstr [] in
-    let add_eqn (clause : (env, ind * ind_tail) Clause.t) =
-      let open Tuple.Ops in
-      let pat :: _ = clause.v.pats in
-      match DAst.get (Eq.cast CasesPattern.eq pat) with
-      | PatVar _ ->
-          Tuple.iter branches (fun i ->
-            branches.%(i) <- clause :: branches.%(i))
-      | PatCstr (cstr, _, _) ->
-          failwith "Not implemented" in
-    failwith "Not implemented"
-
-  let compile_case
-      (type env tomatch_length eqns_length return_pred_height tail_height)
-      (tomatch : (env, return_pred_height) Tomatch.t)
-      (tomatches : (env, tomatch_length, tail_height) TomatchVector.t)
-      (problem :
-         (env, tomatch_length Nat.succ, eqns_length,
            return_pred_height * tail_height) PatternMatchingProblem.t) :
       env Judgment.t EvarMapMonad.t =
     let open EvarMapMonad.Ops in
@@ -1415,8 +1658,8 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
         compile_case_trivial tomatch vars return_pred tomatches problem
     | None ->
         match tomatch.inductive_type with
-        | Error _ -> assert false
-        | Ok ind ->
+        | None -> assert false
+        | Some ind ->
             compile_destruct tomatch ind tomatches problem
 
   let compile_loop (type env tomatch_length eqns_length return_pred_height)
@@ -1439,14 +1682,33 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
       (style : Constr.case_style) (env : env GlobalEnv.t)
       (predopt : Glob_term.glob_constr option)
       (tomatches : Glob_term.tomatch_tuple list)
-      (eqns : Glob_term.cases_clause list) :
+      (eqns : (Glob_term.cases_clause, eqns_length) Vector.t) :
       env Judgment.t EvarMapMonad.t =
     let open EvarMapMonad.Ops in
-    let* Exists tomatches = Typer.type_tomatches env tomatches eqns in
+    let module EqnLength = struct type t = eqns_length end in
+    let module T = TypeTomatch (EqnLength) in
+    let Exists tomatches = Vector.of_list tomatches in
+    let pats = eqns |> Vector.map (fun (eqn : Glob_term.cases_clause) ->
+      let _id, pats, _rhs = eqn.v in
+      pats) in
+    let empty_pats, tomatches =
+      let open StateMonad.Ops in
+      StateMonad.run pats (
+        StateMonad.vector_map (fun tomatch ->
+          let* pats = StateMonad.get in
+          let pat, pats =
+            Vector.map_split (fun pats ->
+              match pats with
+              | [] -> assert false
+              | hd :: tl -> hd, tl) pats in
+          let* () = StateMonad.set pats in
+          return (tomatch, pat)) tomatches) in
+    assert (Vector.for_all (fun pats -> pats = []) empty_pats);
+    let* Exists (tomatches, pats) = T.type_tomatches env tomatches in
     let* sigma = EvarMapMonad.get in
     let return_pred_context, _ =
-      TomatchWithContextVector.make_return_pred_context (GlobalEnv.env env)
-        sigma tomatches in
+      T.PrepareTomatch.TomatchWithContextVector.make_return_pred_context
+        (GlobalEnv.env env) sigma tomatches in
     let hypnaming = naming_of_program_mode MatchContext.program_mode in
     let _, return_pred_env =
       GlobalEnv.push_rel_context ~hypnaming sigma return_pred_context env in
@@ -1456,7 +1718,10 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
           let* judgment = Typer.judgment_of_glob_constr return_pred_env term in
           return (ReturnPred.ReturnPred (Judgment.uj_val judgment))
       | None -> return (ReturnPred.Tycon tycon) in
-    let tomatches = TomatchWithContextVector.to_tomatch_vector tomatches in
+    let eqns =
+      T.PrepareTomatch.TomatchWithContextVector.to_clauses env eqns tomatches in
+    let tomatches =
+      T.PrepareTomatch.TomatchWithContextVector.to_tomatch_vector tomatches in
     compile_loop { env; tomatches; return_pred; eqns }
 end
 
@@ -1480,6 +1745,7 @@ let compile_cases ?loc ~(program_mode : bool) (style : Constr.case_style)
   end in
   let env = Eq.cast (Eq.sym GlobalEnv.eq) env in
   let tycon = Option.map (Eq.cast (Eq.sym ETerm.eq)) tycon in
+  let Exists eqns = Vector.of_list eqns in
   sigma |>
   let* judgment =
     Compiler.compile_cases ?tycon style env predopt tomatchl eqns in
