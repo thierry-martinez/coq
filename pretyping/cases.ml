@@ -119,6 +119,10 @@ module type UnaryTypeS = sig
   type 'a t
 end
 
+module type BinaryTypeS = sig
+  type ('a, 'b) t
+end
+
 module PhantomPoly (Type : UnaryTypeS) : sig
   type ('a, 'b) t
 
@@ -308,6 +312,14 @@ module Vector = struct
     | hd :: tl, Succ_plus plus ->
         map_rev_append f tl (f hd :: l1) (Nat.plus_succ plus)
 
+  let rev : type l . ('a, l) t -> ('a, l) t = fun l ->
+    map_rev_append Fun.id l [] (Nat.zero_r (length l))
+
+  let append : type l l0 l1 .
+      ('a, l0) t -> ('b, l1) t -> (l0, l1, l) Nat.plus -> ('a, l) t =
+  fun l0 l1 plus ->
+    map_rev_append Fun.id (rev l0) l1 plus
+
   let rec mapi_aux :
   type i l l' . i Nat.t -> l' Nat.t -> (i, l', l) Nat.plus ->
     (l Diff.t -> 'a -> 'b) -> ('a, l') t -> ('b, l') t =
@@ -463,6 +475,14 @@ module Env = struct
   let assoc : type a b c . (((a * b) * c) t, (a * (b * c)) t) Eq.t = transtype
 
   let commut : type a b . ((a * b) t, (b * a) t) Eq.t = transtype
+
+  let morphism : type a b c d .
+    (a t, b t) Eq.t -> (c t, d t) Eq.t -> ((a * c) t, (b * d) t) Eq.t =
+  fun _ _ -> transtype
+
+  let plus :
+    type a b . (a, b, 'c) Nat.plus -> ((a * b) t, 'c t) Eq.t =
+  fun _ -> transtype
 end
 
 module Height = struct
@@ -477,6 +497,9 @@ module Height = struct
 
   let add (type a b) (a : a t) (b : b t) : (a * b) t =
     Eq.cast (Eq.sym eq) (Eq.cast eq a + Eq.cast eq b)
+
+  let of_nat : type n . n Nat.t -> n t = fun n ->
+    Eq.cast (Eq.sym eq) (Nat.to_int n)
 
   type 'n to_nat = Exists : 'm Nat.t * ('m Env.t, 'n Env.t) Eq.t -> 'n to_nat
 
@@ -574,6 +597,14 @@ module ETerm = struct
     type env length . length Nat.t -> (env * length, length) t = function
       | O -> []
       | S n -> mkProp () :: fake n
+
+    let rec of_vector : type env length.
+      (env term, length) Vector.t -> (env * length, length) t =
+    fun v ->
+      match v with
+      | [] -> []
+      | hd :: tl ->
+          lift (Height.of_nat (Vector.length tl)) hd :: of_vector tl
   end
 
   let substnl (type env n length) (substl : (env * length, length) Substl.t)
@@ -981,21 +1012,6 @@ module MeasurableVector (S : MeasurableS) = struct
 
   type ('env, 'annot, 'height) vector = ('env, 'annot, 'height) t
 
-        (*
-  let rec get_aux : type i annot height l' l .
-    (i, l' Nat.succ, l) Nat.plus -> ('env, annot, height) t ->
-      (annot, l) AnnotLength.t -> 'a =
-  fun plus l len ->
-    match plus, l, len with
-    | Zero_l, hd :: _, _ -> hd
-    | Succ_plus plus, _ :: tl, S len ->
-        get_aux plus tl len
-    | _ -> .
-
-  let get : type l . l Diff.t -> ('a, l) t -> 'a =
-  fun (Exists plus) l ->
-    get_aux plus l
-          *)
   module type ProjS = sig
     module Type : UnaryTypeS
 
@@ -1011,6 +1027,31 @@ module MeasurableVector (S : MeasurableS) = struct
       | [] -> []
       | hd :: tl -> Item.proj hd :: proj tl
   end
+
+  type ('env, 'a) concat_map_f = {
+    f : 'annot 'height . ('env, 'annot, 'height) S.t -> ('a, 'height) Vector.t
+  }
+
+  type ('env, 'height, 'a) concat_map =
+    | Exists : {
+        vector : ('a, 'height_sum) Vector.t;
+        eq : ('height Env.t, 'height_sum Env.t) Eq.t;
+      } -> ('env, 'height, 'a) concat_map
+
+  let rec concat_map : type annot height .
+    ('env, 'a) concat_map_f -> ('env, annot, height) t ->
+      ('env, height, 'a) concat_map =
+  fun f v ->
+    match v with
+    | [] -> Exists { vector = []; eq = Refl }
+    | hd :: tl ->
+       let hd = f.f hd in
+       let Exists { vector = tl; eq } = concat_map f tl in
+       let Exists (new_length, plus) =
+         Nat.add (Vector.length hd) (Vector.length tl) in
+       let vector = Vector.append hd tl plus in
+       Exists { vector;
+         eq = Eq.trans (Env.morphism Refl eq) (Env.plus plus) }
 end
 
 module MeasurableVectorMap (S0 : MeasurableS) (S1 : MeasurableS) = struct
@@ -1614,7 +1655,17 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
     let* return_pred =
       match problem.return_pred with
       | ReturnPred return_pred ->
-          failwith "Not implemented"
+          let get_tomatch_args : type ind height .
+              (env, ind, height) Tomatch.t -> (env ETerm.t, height) Vector.t =
+          fun tomatch ->
+            match tomatch.inductive_type with
+            | None -> []
+            | Some inductive_type ->
+                Judgment.uj_val tomatch.judgment :: inductive_type.realargs in
+          let Exists { vector; eq } =
+            TomatchVector.concat_map { f = get_tomatch_args } tomatches in
+          let substl = ETerm.Substl.of_vector vector in
+          return (ETerm.substl substl return_pred)
       | Tycon None ->
           let* ty, _ =
             EvarMapMonad.new_type_evar (GlobalEnv.env problem.env)
