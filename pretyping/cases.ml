@@ -581,13 +581,13 @@ module ETerm = struct
 
   let substnl (type env n length) (substl : (env t, length) Vector.t)
       (n : n Height.t) (t : ((env * length) * n) t) : (env * n) t =
-    Eq.cast (Eq.arrow (Eq.sym eq) (Eq.sym eq))
-      (EConstr.Vars.substnl (Vector.to_list substl) (Eq.cast Height.eq n)) t
+    Eq.(cast (sym (Eq.list eq ^-> Height.eq ^-> eq ^-> eq)))
+      EConstr.Vars.substnl (Vector.to_list substl) n t
 
   let substl (type env length) (substl : (env t, length) Vector.t)
       (t : (env * length) t) : env t =
-    Eq.cast (Eq.arrow (Eq.sym eq) (Eq.sym eq))
-      (EConstr.Vars.substl (Vector.to_list substl)) t
+    Eq.(cast (sym (Eq.list eq ^-> eq ^-> eq)))
+      EConstr.Vars.substl (Vector.to_list substl) t
 
   let subst1 (type env) (s : env t) (t : (env * Nat.zero Nat.succ) t) : env t =
     substl [s] t
