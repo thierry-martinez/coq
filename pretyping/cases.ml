@@ -579,46 +579,18 @@ module ETerm = struct
       (Reductionops.whd_all (Eq.cast Env.eq env) sigma
          (Eq.cast eq term))
 
-  module Substl = struct
-    type 'a term = 'a t
-
-    type ('env, 'length) t =
-      | [] : ('env * Nat.zero, Nat.zero) t
-      | (::) :
-          ('env * 'length) term * ('env * 'length, 'length) t ->
-            ('env * 'length Nat.succ, 'length Nat.succ) t
-
-    let rec to_list :
-    type env length . (env, length) t -> EConstr.constr list = function
-      | [] -> []
-      | hd :: tl -> Eq.cast eq hd :: to_list tl
-
-    let rec fake :
-    type env length . length Nat.t -> (env * length, length) t = function
-      | O -> []
-      | S n -> mkProp () :: fake n
-
-    let rec of_vector : type env length.
-      (env term, length) Vector.t -> (env * length, length) t =
-    fun v ->
-      match v with
-      | [] -> []
-      | hd :: tl ->
-          lift (Height.of_nat (Vector.length tl)) hd :: of_vector tl
-  end
-
-  let substnl (type env n length) (substl : (env * length, length) Substl.t)
+  let substnl (type env n length) (substl : (env t, length) Vector.t)
       (n : n Height.t) (t : ((env * length) * n) t) : (env * n) t =
     Eq.cast (Eq.arrow (Eq.sym eq) (Eq.sym eq))
-      (EConstr.Vars.substnl (Substl.to_list substl) (Eq.cast Height.eq n)) t
+      (EConstr.Vars.substnl (Vector.to_list substl) (Eq.cast Height.eq n)) t
 
-  let substl (type env length) (substl : (env * length, length) Substl.t)
+  let substl (type env length) (substl : (env t, length) Vector.t)
       (t : (env * length) t) : env t =
     Eq.cast (Eq.arrow (Eq.sym eq) (Eq.sym eq))
-      (EConstr.Vars.substl (Substl.to_list substl)) t
+      (EConstr.Vars.substl (Vector.to_list substl)) t
 
   let subst1 (type env) (s : env t) (t : (env * Nat.zero Nat.succ) t) : env t =
-    substl [Eq.cast (morphism (Eq.sym Env.zero_r)) s] t
+    substl [s] t
 
   let noccur_between (sigma : Evd.evar_map) n m (term : 'env t) : bool =
     EConstr.Vars.noccur_between sigma n m (Eq.cast eq term)
@@ -1663,9 +1635,9 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
             | Some inductive_type ->
                 Judgment.uj_val tomatch.judgment :: inductive_type.realargs in
           let Exists { vector; eq } =
-            TomatchVector.concat_map { f = get_tomatch_args } tomatches in
-          let substl = ETerm.Substl.of_vector vector in
-          return (ETerm.substl substl return_pred)
+            TomatchVector.concat_map { f = get_tomatch_args }
+              (tomatch :: tomatches) in
+          return (ETerm.substl vector return_pred)
       | Tycon None ->
           let* ty, _ =
             EvarMapMonad.new_type_evar (GlobalEnv.env problem.env)
