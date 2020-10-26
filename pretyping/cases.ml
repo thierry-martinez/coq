@@ -794,8 +794,10 @@ end
 module AbstractDeclaration (X : AbstractTermS) = struct
   module Judgment = AbstractJudgment (X)
 
+  type concrete = (X.Concrete.t, X.Concrete.t) Context.Rel.Declaration.pt
+
   include Phantom (struct
-    type t = (X.Concrete.t, X.Concrete.t) Context.Rel.Declaration.pt
+    type t = concrete
   end)
 
   let morphism (type a b) (_ : (a Env.t, b Env.t) Eq.t) : (a t, b t) Eq.t =
@@ -809,6 +811,16 @@ module AbstractDeclaration (X : AbstractTermS) = struct
     let uj_val = Eq.cast X.eq (Judgment.uj_val judgment) in
     let uj_type = Eq.cast X.eq (Judgment.uj_type judgment) in
     Eq.cast (Eq.sym eq) (LocalDef (as_name, uj_val, uj_type))
+
+
+  include Lift (struct
+    module Phantom = struct type nonrec ('a, 'p, 'q) t = 'a t end
+    module Concrete = struct type t = concrete end
+    let unsafe_map f =
+      Eq.(cast (sym (eq ^-> eq))) f
+    let liftn n m decl =
+      Context.Rel.Declaration.map_constr (X.Concrete.liftn n m) decl
+  end)
 end
 
 module EDeclaration = AbstractDeclaration (ETerm)
@@ -820,6 +832,15 @@ module AbstractRelContext (X : AbstractTermS) = struct
     | [] : ('env, Nat.zero) t
     | (::) : ('env * 'length) Declaration.t * ('env, 'length) t ->
         ('env, 'length Nat.succ) t
+
+  let rec morphism : type a b length .
+        (a Env.t, b Env.t) Eq.t -> (a, length) t -> (b, length) t =
+  fun eq context ->
+    match context with
+    | [] -> []
+    | hd :: tl ->
+        Eq.cast (Declaration.morphism (Env.morphism eq Refl)) hd ::
+        morphism eq tl
 
   let rec push : type outer length_inner length_outer length .
       (outer * length_outer, length_inner) t ->
@@ -844,6 +865,10 @@ module AbstractRelContext (X : AbstractTermS) = struct
 
   type concrete = (X.Concrete.t, X.Concrete.t) Context.Rel.pt
 
+  type ('env, 'height) with_height =
+      Exists : ('env, 'length) t * ('length Env.t, 'height Env.t) Eq.t ->
+        ('env, 'height) with_height
+
   let rec of_concrete : type env . concrete -> env exists =
   fun context ->
     match context with
@@ -857,6 +882,24 @@ module AbstractRelContext (X : AbstractTermS) = struct
     match context with
     | [] -> []
     | hd :: tl -> Eq.cast Declaration.eq hd :: to_concrete tl
+
+  let rec liftn : type env n m length .
+    n Height.t -> m Height.t -> (env * m, length) t ->
+      ((env * n) * m, length) t =
+  fun n m context ->
+    match context with
+    | [] -> []
+    | hd :: tl ->
+        let tl = liftn n m tl in
+        let l = Height.of_nat (length tl) in
+        Eq.cast (Eq.sym (Declaration.morphism Env.assoc))
+          (Declaration.liftn n (Height.add m l)
+            (Eq.cast (Declaration.morphism Env.assoc) hd)) :: tl
+
+  let lift (type env length n) (n : n Height.t) (context : (env, length) t) :
+      (env * n, length) t =
+    morphism Env.zero_r
+      (liftn n Height.zero (morphism (Eq.sym Env.zero_r) context))
 
   let untyped_liftn n m context =
     let add decl (new_context, m) =
@@ -1455,7 +1498,7 @@ module PrepareTomatch (EqnLength : Type) = struct
   module TomatchWithContext = struct
     type ('env, 'ind, 'height) t = {
         tomatch : ('env, 'ind, 'height) Tomatch.t;
-        return_pred_context : ('env, 'height) ERelContext.t;
+        return_pred_context : ('env, 'height) ERelContext.with_height;
         pats : (('env, 'ind) CasesPattern.t, EqnLength.t) Vector.t;
       }
 
@@ -1632,16 +1675,19 @@ module PrepareTomatch (EqnLength : Type) = struct
     type env annot return_pred_height .
           env Env.t -> Evd.evar_map ->
             (env, annot, return_pred_height) t ->
-            (env, return_pred_height) ERelContext.t *
+            (env, return_pred_height) ERelContext.with_height *
                 return_pred_height Height.t =
     fun env sigma tomatchl ->
       match tomatchl with
-      | [] -> [], Height.zero
-      | { return_pred_context;
+      | [] -> Exists ([], Refl), Height.zero
+      | { return_pred_context = Exists (return_pred_context, eq_return);
           tomatch = { return_pred_height; _ }} :: tl ->
-          let tl, length = make_return_pred_context env sigma tl in
-          ERelContext.push (ERelContext.lift length return_pred_context) tl,
-          Height.add return_pred_height length
+          let Exists (tl, eq_tl), length =
+            make_return_pred_context env sigma tl in
+          let context =
+            ERelContext.push (ERelContext.lift length return_pred_context) tl
+              plus in
+          Exists (context, eq), Height.add return_pred_height length
       | _ -> .
 
     type ('env, 'length) exists =
@@ -1942,13 +1988,14 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
         let Exists eqns = Vector.of_list (List.rev clauses) in
         let eqns =
           eqns |> Vector.map (
-          fun (clause : (env, ind CasesPattern.known * ind_tail) Clause.t) =
+          fun (clause : (env, ind CasesPattern.known * ind_tail) Clause.t) ->
             let pat :: tail = clause.pats in
             let subpats =
               match pat with
               | Var -> Vector.make cstr.arity Var
               | Cstr { cstr; pats } ->
-
+                  assert false in
+            assert false
             ) in
         let sub_problem = {
           PatternMatchingProblem.env = env;
