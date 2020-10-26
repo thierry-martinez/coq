@@ -883,18 +883,20 @@ module AbstractRelContext (X : AbstractTermS) = struct
     | [] -> []
     | hd :: tl -> Eq.cast Declaration.eq hd :: to_concrete tl
 
-  let rec liftn : type env n m length .
+  let rec liftn_aux : type env n m length .
     n Height.t -> m Height.t -> (env * m, length) t ->
-      ((env * n) * m, length) t =
+      ((env * n) * m, length) t * length Nat.t =
   fun n m context ->
     match context with
-    | [] -> []
+    | [] -> [], Nat.O
     | hd :: tl ->
-        let tl = liftn n m tl in
-        let l = Height.of_nat (length tl) in
+        let tl, l = liftn_aux n m tl in
         Eq.cast (Eq.sym (Declaration.morphism Env.assoc))
-          (Declaration.liftn n (Height.add m l)
-            (Eq.cast (Declaration.morphism Env.assoc) hd)) :: tl
+          (Declaration.liftn n (Height.add m (Height.of_nat l))
+            (Eq.cast (Declaration.morphism Env.assoc) hd)) :: tl, S l
+
+  let liftn n m context =
+    fst (liftn_aux n m context)
 
   let lift (type env length n) (n : n Height.t) (context : (env, length) t) :
       (env * n, length) t =
