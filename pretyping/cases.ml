@@ -115,19 +115,23 @@ end = struct
   let transtype = Eq.Refl
 end
 
-module type UnaryTypeS = sig
+module type Type1S = sig
   type 'a t
 end
 
-module type BinaryTypeS = sig
+module type Type2S = sig
   type ('a, 'b) t
 end
 
-module type TernaryTypeS = sig
+module type Type3S = sig
   type ('a, 'b, 'c) t
 end
 
-module PhantomPoly (Type : UnaryTypeS) : sig
+module type Type4S = sig
+  type ('a, 'b, 'c, 'd) t
+end
+
+module PhantomPoly (Type : Type1S) : sig
   type ('a, 'b) t
 
   val eq : (('a, 'b) t, 'a Type.t) Eq.t
@@ -666,37 +670,40 @@ module type ConcreteTermS = sig
 end
 
 module type ConcreteLiftS = sig
-  module Phantom : TernaryTypeS
+  module Phantom : Type4S
 
   module Concrete : TypeS
 
   val unsafe_map :
       (Concrete.t -> Concrete.t) ->
-        ('a, 'p, 'q) Phantom.t -> ('b, 'p, 'q) Phantom.t
+        ('a, 'p, 'q, 'r) Phantom.t -> ('b, 'p, 'q, 'r) Phantom.t
 
   val liftn : int -> int -> Concrete.t -> Concrete.t
 end
 
 module type LiftS = sig
-  type ('env, 'p, 'q) t
+  type ('env, 'p, 'q, 'r) t
 
-  val liftn : 'n Height.t -> 'm Height.t -> ('env * 'm, 'p, 'q) t ->
-      (('env * 'n) * 'm, 'p, 'q) t
+  val liftn : 'n Height.t -> 'm Height.t -> ('env * 'm, 'p, 'q, 'r) t ->
+      (('env * 'n) * 'm, 'p, 'q, 'r) t
 
-  val lift : 'n Height.t -> ('env, 'p, 'q) t -> ('env * 'n, 'p, 'q) t
+  val lift : 'n Height.t -> ('env, 'p, 'q, 'r) t -> ('env * 'n, 'p, 'q, 'r) t
 end
 
 module Lift (X : ConcreteLiftS) :
-    LiftS with type ('env, 'p, 'q) t := ('env, 'p, 'q) X.Phantom.t = struct
+    LiftS with type ('env, 'p, 'q, 'r) t := ('env, 'p, 'q, 'r) X.Phantom.t =
+  struct
   let liftn (type env n m)
-      (n : n Height.t) (m : m Height.t) (term : (env * m, 'p, 'q) X.Phantom.t) :
-      ((env * n) * m, 'p, 'q) X.Phantom.t =
+      (n : n Height.t) (m : m Height.t)
+      (term : (env * m, 'p, 'q, 'r) X.Phantom.t) :
+      ((env * n) * m, 'p, 'q, 'r) X.Phantom.t =
     X.unsafe_map
       (X.liftn (Eq.cast Height.eq n) (succ (Eq.cast Height.eq m)))
       term
 
-  let lift (type env n m) (n : n Height.t) (term : (env, 'p, 'q) X.Phantom.t) :
-      (env * n, 'p, 'q) X.Phantom.t =
+  let lift (type env n m) (n : n Height.t)
+      (term : (env, 'p, 'q, 'r) X.Phantom.t) :
+      (env * n, 'p, 'q, 'r) X.Phantom.t =
     X.unsafe_map (X.liftn (Eq.cast Height.eq n) 1) term
 end
 
@@ -709,7 +716,7 @@ module type AbstractTermS = sig
 
   val morphism : ('a Env.t, 'b Env.t) Eq.t -> ('a t, 'b t) Eq.t
 
-  include LiftS with type ('env, 'p, 'q) t := 'env t
+  include LiftS with type ('env, 'p, 'q, 'r) t := 'env t
 
   val mkRel : 'a Index.t -> 'a t
 
@@ -731,7 +738,7 @@ module AbstractTerm (X : ConcreteTermS) :
     transtype
 
   include Lift (struct
-    module Phantom = struct type nonrec ('a, 'p, 'q) t = 'a t end
+    module Phantom = struct type nonrec ('a, 'p, 'q, 'r) t = 'a t end
     module Concrete = X
     let unsafe_map f =
       Eq.(cast (sym (eq ^-> eq))) f
@@ -829,7 +836,7 @@ module AbstractJudgment (X : AbstractTermS) = struct
       Environ.make_judge uj_val uj_type
 
   include Lift (struct
-    module Phantom = struct type nonrec ('a, 'p, 'q) t = 'a t end
+    module Phantom = struct type nonrec ('a, 'p, 'q, 'r) t = 'a t end
     module Concrete = struct type t = concrete end
     let unsafe_map f =
       Eq.(cast (sym (eq ^-> eq))) f
@@ -866,103 +873,147 @@ module EJudgment = struct
        (sigma, (result, trace)))
 end
 
-module AbstractDeclaration (X : AbstractTermS) = struct
-  module Judgment = AbstractJudgment (X)
+module AbstractDeclaration = struct
+  module Self (X : AbstractTermS) = struct
+    type ('env, 'nb_args, 'nb_args_tail) desc =
+      | LocalAssum : ('env, 'nb Nat.succ, 'nb) desc
+      | LocalDef : 'env X.t -> ('env, 'nb, 'nb) desc
 
-  type concrete = X.Concrete.rel_declaration
+    type ('env, 'nb_args, 'nb_args_tail) t = {
+        name : Names.Name.t Context.binder_annot;
+        ty : 'env X.t;
+        desc : ('env, 'nb_args, 'nb_args_tail) desc;
+      }
 
-  include Phantom (struct
-    type t = concrete
-  end)
+    type ('env, 'nb_args_tail) exists =
+        Exists :
+          ('env, 'nb_args, 'nb_args_tail) t -> ('env, 'nb_args_tail) exists
+  end
 
-  let morphism (type a b) (_ : (a Env.t, b Env.t) Eq.t) : (a t, b t) Eq.t =
-    transtype
+  module Map (X0 : AbstractTermS) (X1 : AbstractTermS) = struct
+    module D0 = Self (X0)
+    module D1 = Self (X1)
 
-  let assum (type env) as_name (ty : env X.t) : env t =
-    Eq.cast (Eq.sym eq) (LocalAssum (as_name, Eq.cast X.eq ty))
+    let map (type a b nb nb_tail) (f : a X0.t -> b X1.t)
+        (d : (a, nb, nb_tail) D0.t) : (b, nb, nb_tail) D1.t =
+      { name = d.name;
+        ty = f d.ty;
+        desc = match d.desc with
+        | LocalAssum -> LocalAssum
+        | LocalDef v -> LocalDef (f v)
+      }
+  end
 
-  let local_def (type env) (as_name : Names.Name.t Context.binder_annot)
-      (judgment : env Judgment.t) : env t =
-    let uj_val = Eq.cast X.eq (Judgment.uj_val judgment) in
-    let uj_type = Eq.cast X.eq (Judgment.uj_type judgment) in
-    Eq.cast (Eq.sym eq) (LocalDef (as_name, uj_val, uj_type))
+  module Make (X : AbstractTermS) = struct
+    include Self (X)
 
-  let get_type (type env) (d : env t) : env X.t =
-    Eq.(cast (sym (eq ^-> X.eq))) Context.Rel.Declaration.get_type d
+    include Map (X) (X)
 
-  include Lift (struct
-    module Phantom = struct type nonrec ('a, 'p, 'q) t = 'a t end
-    module Concrete = struct type t = concrete end
-    let unsafe_map f =
-      Eq.(cast (sym (eq ^-> eq))) f
+    let of_concrete (d : X.Concrete.rel_declaration) :
+        ('env, 'nb_args_tail) exists =
+      match d with
+      | LocalAssum (name, ty) ->
+          Exists { name; ty = Eq.(cast (sym X.eq)) ty; desc = LocalAssum }
+      | LocalDef (name, v, ty) ->
+          Exists { name; ty = Eq.(cast (sym X.eq)) ty;
+            desc = LocalDef (Eq.(cast (sym X.eq)) v) }
+
+    let to_concrete (type env nb_args nb_args_tail)
+        (d : (env, nb_args, nb_args_tail) t) : X.Concrete.rel_declaration =
+      match d.desc with
+      | LocalAssum -> LocalAssum (d.name, Eq.cast X.eq d.ty)
+      | LocalDef v -> LocalDef (d.name, Eq.cast X.eq v, Eq.cast X.eq d.ty)
+
+    let morphism (type a b nb nb_tail) (eq : (a Env.t, b Env.t) Eq.t)
+        (d : (a, nb, nb_tail) t) : (b, nb, nb_tail) t =
+      map (Eq.cast (X.morphism eq)) d
+
+    let assum (type env nb) name (ty : env X.t) : (env, nb Nat.succ, nb) t =
+      { name; ty; desc = LocalAssum }
+
+    module Judgment = AbstractJudgment (X)
+
+    let local_def (type env nb) (name : Names.Name.t Context.binder_annot)
+        (judgment : env Judgment.t) : (env, nb, nb) t =
+      { name; ty = Judgment.uj_type judgment;
+        desc = LocalDef (Judgment.uj_val judgment) }
+
     let liftn n m decl =
-      Context.Rel.Declaration.map_constr (X.Concrete.liftn n m) decl
-  end)
+      map (X.liftn n m) decl
 
-  let set_name name decl =
-    Eq.(cast (sym (Refl ^-> eq ^-> eq))) Context.Rel.Declaration.set_name
-      name decl
-end
-
-module DeclarationMap (X0 : AbstractTermS) (X1 : AbstractTermS) = struct
-  module D0 = AbstractDeclaration (X0)
-  module D1 = AbstractDeclaration (X1)
-
-  let map (type a b) (f : a X0.t -> b X1.t) (d : a D0.t) : b D1.t =
-    Eq.(cast (sym ((X0.eq ^-> X1.eq) ^-> D0.eq ^-> D1.eq)))
-      Context.Rel.Declaration.map_constr_het f d
+    let set_name name decl =
+      { decl with name = { decl.name with binder_name = name }}
+  end
 end
 
 module EDeclaration = struct
-  include AbstractDeclaration (ETerm)
+  include AbstractDeclaration.Make (ETerm)
 
   let of_declaration d =
-    let module Map = DeclarationMap (Term) (ETerm) in
+    let module Map = AbstractDeclaration.Map (Term) (ETerm) in
     Map.map ETerm.of_term d
 end
 
 module AbstractRelContext (X : AbstractTermS) = struct
-  module Declaration = AbstractDeclaration (X)
+  module Declaration = AbstractDeclaration.Make (X)
 
-  type ('env, 'length) t =
-    | [] : ('env, Nat.zero) t
-    | (::) : ('env * 'length) Declaration.t * ('env, 'length) t ->
-        ('env, 'length Nat.succ) t
+  type ('env, 'length, 'nb_args) t =
+    | [] : ('env, Nat.zero, Nat.zero) t
+    | (::) : ('env * 'length, 'nb_args, 'nb_args_tail) Declaration.t *
+        ('env, 'length, 'nb_args_tail) t ->
+        ('env, 'length Nat.succ, 'nb_args) t
 
-  let rec morphism : type a b length .
-        (a Env.t, b Env.t) Eq.t -> (a, length) t -> (b, length) t =
+  let rec morphism : type a b length nb .
+        (a Env.t, b Env.t) Eq.t -> (a, length, nb) t -> (b, length, nb) t =
   fun eq context ->
     match context with
     | [] -> []
     | hd :: tl ->
-        Eq.cast (Declaration.morphism (Env.morphism eq Refl)) hd ::
+        Declaration.morphism (Env.morphism eq Refl) hd ::
         morphism eq tl
 
-  let rec push : type outer length_inner length_outer length .
-      (outer * length_outer, length_inner) t ->
-      (outer, length_outer) t ->
+  let rec push : type outer length_inner length_outer length
+        nb_inner nb_outer nb .
+      (outer * length_outer, length_inner, nb_inner) t ->
+      (outer, length_outer, nb_outer) t ->
       (length_inner, length_outer, length) Nat.plus ->
-      (outer, length) t =
-  fun inner_context outer_context plus ->
-    match inner_context, plus with
-    | [], Zero_l -> outer_context
-    | hd :: tl, Succ_plus plus ->
-        Eq.cast (Declaration.morphism (Eq.trans Env.assoc (Env.morphism Refl
-          (Eq.trans Env.commut (Env.plus plus))))) hd ::
-        push tl outer_context plus
+      (nb_inner, nb_outer, nb) Nat.plus ->
+      (outer, length, nb) t =
+  fun inner_context outer_context plus plus_nb ->
+    match inner_context, plus, plus_nb with
+    | [], Zero_l, Zero_l -> outer_context
+    | hd :: tl, Succ_plus plus, _ ->
+        let hd =
+          Declaration.morphism (Eq.trans Env.assoc (Env.morphism Refl
+          (Eq.trans Env.commut (Env.plus plus)))) hd in
+        match hd.desc, plus_nb with
+        | LocalAssum, Succ_plus plus_nb ->
+            { hd with desc = LocalAssum } :: push tl outer_context plus plus_nb
+        | LocalDef ty, _ ->
+            { hd with desc = LocalDef ty } :: push tl outer_context plus plus_nb
 
-  let rec length : type env length . (env, length) t -> length Nat.t =
+  let rec length :
+  type env length nb_args . (env, length, nb_args) t -> length Nat.t =
   fun v ->
     match v with
     | [] -> O
     | _hd :: tl -> S (length tl)
 
-  type 'env exists = Exists : ('env, 'length) t -> 'env exists
+  let rec nb_args :
+  type env length nb_args . (env, length, nb_args) t -> nb_args Nat.t =
+  fun v ->
+    match v with
+    | [] -> O
+    | { desc = LocalAssum; _ } :: tl -> S (nb_args tl)
+    | { desc = LocalDef _; _ } :: tl -> nb_args tl
+
+  type 'env exists = Exists : ('env, 'length, 'nb_args) t -> 'env exists
 
   type concrete = X.Concrete.rel_context
 
   type ('env, 'height) with_height =
-      Exists : ('env, 'length) t * ('length Env.t, 'height Env.t) Eq.t ->
+      Exists : ('env, 'length, 'nb_args) t
+        * ('length Env.t, 'height Env.t) Eq.t ->
         ('env, 'height) with_height
 
   let rec of_concrete : type env . concrete -> env exists =
@@ -971,31 +1022,34 @@ module AbstractRelContext (X : AbstractTermS) = struct
     | [] -> Exists []
     | hd :: tl ->
         let Exists tl = of_concrete tl in
-        Exists (Eq.cast (Eq.sym Declaration.eq) hd :: tl)
+        let Exists hd = Declaration.of_concrete hd in
+        Exists (hd :: tl)
 
-  let rec to_concrete : type env length . (env, length) t -> concrete =
+  let rec to_concrete :
+  type env length nb_args . (env, length, nb_args) t -> concrete =
   fun context ->
     match context with
     | [] -> []
-    | hd :: tl -> Eq.cast Declaration.eq hd :: to_concrete tl
+    | hd :: tl -> Declaration.to_concrete hd :: to_concrete tl
 
-  let rec liftn_aux : type env n m length .
-    n Height.t -> m Height.t -> (env * m, length) t ->
-      ((env * n) * m, length) t * length Height.t =
+  let rec liftn_aux : type env n m length nb_args .
+    n Height.t -> m Height.t -> (env * m, length, nb_args) t ->
+      ((env * n) * m, length, nb_args) t * length Height.t =
   fun n m context ->
     match context with
     | [] -> [], Height.zero
     | hd :: tl ->
         let tl, l = liftn_aux n m tl in
-        Eq.cast (Eq.sym (Declaration.morphism Env.assoc))
+        Declaration.morphism (Eq.sym Env.assoc)
           (Declaration.liftn n (Height.add m l)
-            (Eq.cast (Declaration.morphism Env.assoc) hd)) :: tl, Height.succ l
+            (Declaration.morphism Env.assoc hd)) :: tl, Height.succ l
 
   let liftn n m context =
     fst (liftn_aux n m context)
 
-  let lift (type env length n) (n : n Height.t) (context : (env, length) t) :
-      (env * n, length) t =
+  let lift (type env length nb_args n) (n : n Height.t)
+      (context : (env, length, nb_args) t) :
+      (env * n, length, nb_args) t =
     morphism Env.zero_r
       (liftn n Height.zero (morphism (Eq.sym Env.zero_r) context))
 
@@ -1008,15 +1062,15 @@ module AbstractRelContext (X : AbstractTermS) = struct
       Context.Rel.fold_outside add context ~init:(Context.Rel.empty, m) in
     new_context
 
-  let it_mkLambda_or_LetIn (type env length)
-      (t : (env * length) X.t) (context : (env, length) t) : env X.t =
+  let it_mkLambda_or_LetIn (type env length nb_args)
+      (t : (env * length) X.t) (context : (env, length, nb_args) t) : env X.t =
     Eq.(cast (sym (X.eq ^-> Refl ^-> X.eq)))
       X.Concrete.it_mkLambda_or_LetIn t (to_concrete context)
 
   module Judgment = Declaration.Judgment
 
-  let rec to_rel_vector : type env length .
-      (env, length) t ->
+  let rec to_rel_vector : type env length nb_args.
+      (env, length, nb_args) t ->
         ((env * length) Judgment.t, length) Vector.t =
   fun context ->
     match context with
@@ -1027,14 +1081,14 @@ module AbstractRelContext (X : AbstractTermS) = struct
           (Env.morphism Refl Env.succ))
         (Judgment.make (X.mkRel (Index.zero ()))
           (Eq.cast (X.morphism Env.succ)
-             (X.lift Height.one (Declaration.get_type hd)))) ::
+             (X.lift Height.one hd.ty))) ::
         Vector.map
           (fun j -> Judgment.morphism (Eq.trans Env.assoc (Env.morphism Refl
              Env.succ)) (Judgment.lift Height.one j)) tl
 
-  let rec set_names : type env length .
-    (Names.Name.t, length) Vector.t -> (env, length) t ->
-      (env, length) t =
+  let rec set_names : type env length nb_args .
+    (Names.Name.t, length) Vector.t -> (env, length, nb_args) t ->
+      (env, length, nb_args) t =
   fun names context ->
     match names, context with
     | [], [] -> []
@@ -1047,11 +1101,13 @@ module RelContextMap (X0 : AbstractTermS) (X1 : AbstractTermS) = struct
   module C1 = AbstractRelContext (X1)
 
   type map = {
-      f : 'height . 'height C0.Declaration.t -> 'height C1.Declaration.t;
+      f : 'height 'nb_args 'nb_args_tail .
+        ('height, 'nb_args, 'nb_args_tail) C0.Declaration.t ->
+          ('height, 'nb_args, 'nb_args_tail) C1.Declaration.t;
     }
 
-  let rec map : type env length .
-    map -> (env, length) C0.t -> (env, length) C1.t =
+  let rec map : type env length nb_args .
+    map -> (env, length, nb_args) C0.t -> (env, length, nb_args) C1.t =
   fun f c ->
     match c with
     | [] -> []
@@ -1075,24 +1131,36 @@ module GlobalEnv = struct
   let env (glob_env : 'env t) : 'env Env.t =
     Eq.cast (Eq.sym Env.eq) (GlobEnv.env (Eq.cast eq glob_env))
 
-  let push_rel (type env) ~hypnaming
-      (sigma : Evd.evar_map) (d : env EDeclaration.t)
-      (glob_env : env t) : env EDeclaration.t * (env * Nat.zero Nat.succ) t =
-    Eq.cast (Eq.pair (Eq.sym EDeclaration.eq) (Eq.sym eq))
-      (GlobEnv.push_rel ~hypnaming sigma (Eq.cast EDeclaration.eq d)
-         (Eq.cast eq glob_env))
+  let push_rel (type env nb_args nb_args_tail) ~hypnaming
+      (sigma : Evd.evar_map) (d : (env, nb_args, nb_args_tail) EDeclaration.t)
+      (glob_env : env t) :
+      (env, nb_args, nb_args_tail) EDeclaration.t *
+      (env * Nat.zero Nat.succ) t =
+    let d', env =
+      GlobEnv.push_rel ~hypnaming sigma (EDeclaration.to_concrete d)
+         (Eq.cast eq glob_env) in
+    let env = Eq.(cast (sym eq)) env in
+    let Exists d' =
+      (EDeclaration.of_concrete d' : (env, nb_args_tail) EDeclaration.exists) in
+    match d.desc, d'.desc with
+    | LocalAssum, LocalAssum -> d', env
+    | LocalDef _, LocalDef _ -> d', env
+    | _ -> assert false
 
-  let push_rel_context (type env) (type height) ~hypnaming
-      (sigma : Evd.evar_map) (context : (env, height) ERelContext.t)
-      (glob_env : env t) : (env, height) ERelContext.t * (env * height) t =
+  let push_rel_context (type env height nb_args) ~hypnaming
+      (sigma : Evd.evar_map) (context : (env, height, nb_args) ERelContext.t)
+      (glob_env : env t) :
+      (env, height, nb_args) ERelContext.t * (env * height) t =
     let context', env =
       GlobEnv.push_rel_context ~hypnaming sigma
          (ERelContext.to_concrete context) (Eq.cast eq glob_env) in
     let Exists context' = ERelContext.of_concrete context' in
     match Nat.is_eq (ERelContext.length context)
-        (ERelContext.length context') with
-    | None -> assert false
-    | Some Refl -> context', Eq.cast (Eq.sym eq) env
+        (ERelContext.length context'),
+    Nat.is_eq (ERelContext.nb_args context)
+        (ERelContext.nb_args context')with
+    | Some Refl, Some Refl -> context', Eq.cast (Eq.sym eq) env
+    | _ -> assert false
 
   let morphism (type a b) (_ : (a Env.t, b Env.t) Eq.t) :
       (a t, b t) Eq.t =
@@ -1114,7 +1182,7 @@ module InductiveSpecif = struct
 end
 
 module AnnotatedVector = struct
-  module Self (S : BinaryTypeS) = struct
+  module Self (S : Type2S) = struct
     type ('env, 'length, 'annot, 'end_annot) section =
       | [] : ('env, Nat.zero, 'end_annot, 'end_annot) section
       | (::) :
@@ -1143,7 +1211,7 @@ module AnnotatedVector = struct
       | hd :: tl -> f.f hd :: to_vector f tl
   end
 
-  module Map (S0 : BinaryTypeS) (S1 : BinaryTypeS) = struct
+  module Map (S0 : Type2S) (S1 : Type2S) = struct
     module V0 = Self (S0)
 
     module V1 = Self (S1)
@@ -1166,7 +1234,7 @@ module AnnotatedVector = struct
     let map f v = map_append f v [] (Nat.zero_r (V0.length v))
   end
 
-  module Make (S : BinaryTypeS) = struct
+  module Make (S : Type2S) = struct
     include Self (S)
 
     include Map (S) (S)
@@ -1240,13 +1308,14 @@ module InductiveFamily = struct
 
   let get_arity (type env ind params nrealargs nrealdecls) (env : env Env.t)
       (indf : (env, ind, params, nrealargs, nrealdecls) t) :
-      (env, nrealdecls) ERelContext.t =
+      (env, nrealdecls, nrealargs) ERelContext.t =
     let Exists context =
       ERelContext.of_concrete (List.map EConstr.of_rel_decl (fst
         (Inductiveops.get_arity (Eq.cast Env.eq env) (to_concrete indf)))) in
-    match Nat.is_eq (ERelContext.length context) indf.nrealdecls with
-    | None -> assert false
-    | Some Refl -> context
+    match Nat.is_eq (ERelContext.length context) indf.nrealdecls,
+     Nat.is_eq (ERelContext.nb_args context) indf.nrealargs with
+    | Some Refl, Some Refl -> context
+    | _ -> assert false
 
   let build_dependent_inductive  (type env ind params nrealargs nrealdecls)
       (env : env Env.t) (indf : (env, ind, params, nrealargs, nrealdecls) t) :
@@ -1376,50 +1445,72 @@ module ConstructorSummary = struct
   type ('env, 'ind, 'nrealargs, 'arity) t = {
       desc : Inductiveops.constructor_summary;
       cstr : 'ind Constructor.t;
-      args : ('env, 'arity) RelContext.t;
+      args : ('env, 'arity, 'nrealargs) RelContext.t;
       arity : 'arity Nat.t;
-      real_args : ('env ETerm.t, 'nrealargs) Vector.t;
+      concl_realargs : (('env * 'arity) ETerm.t, 'nrealargs) Vector.t;
+      nrealargs : 'nrealargs Nat.t;
     }
 
   type ('env, 'ind, 'nrealargs) exists =
-      Exists : ('env, 'ind, 'n'arity) t -> ('env, 'ind) exists
+      Exists : ('env, 'ind, 'nrealargs, 'arity) t ->
+        ('env, 'ind, 'nrealargs) exists
 
-  let unsafe_make (desc : Inductiveops.constructor_summary)
-      (cstr : 'ind Constructor.t) : ('env, 'ind) exists =
+  let unsafe_make (type nrealargs) (desc : Inductiveops.constructor_summary)
+      (nrealargs : nrealargs Nat.t)
+      (cstr : 'ind Constructor.t) : ('env, 'ind, nrealargs) exists =
     let Exists args = RelContext.of_concrete desc.cs_args in
-    Exists { desc; cstr; args; arity = RelContext.length args }
+    match Nat.is_eq (RelContext.nb_args args) nrealargs with
+    | None -> assert false
+    | Some Refl ->
+    let concl_realargs =
+      Array.map (fun constr -> ETerm.of_term (Eq.(cast (sym Term.eq)) constr))
+        desc.cs_concl_realargs in
+    let concl_realargs =
+      match
+        Vector.of_list_of_length (Array.to_list concl_realargs) nrealargs
+      with
+      | None -> assert false
+      | Some concl_realargs -> concl_realargs in
+        Exists { desc; cstr; args; arity = RelContext.length args;
+          concl_realargs; nrealargs }
 
   let get (env : 'env Env.t)
       (indf : ('env, 'ind, 'params, 'nrealargs, 'nrealdecls) InductiveFamily.t)
       (specif : ('env, 'ind) InductiveSpecif.t)
-      (cstr : 'ind Constructor.t) : ('env, 'ind) exists =
+      (cstr : 'ind Constructor.t) : ('env, 'ind, 'nrealargs) exists =
     let indu, params =
       Inductiveops.dest_ind_family (InductiveFamily.to_concrete indf) in
     let mib, mip = Eq.cast InductiveSpecif.eq specif in
     let index = succ (Eq.cast Index.eq (Constructor.index cstr)) in
     let desc = Inductiveops.get_constructor (indu, mib, mip, params) index in
-    unsafe_make desc cstr
+    unsafe_make desc indf.nrealargs cstr
 
   let get_tuple (env : 'env Env.t)
       (indf : ('env, 'ind, 'params, 'nrealargs, 'nrealdecls) InductiveFamily.t)
       (specif : ('env, 'ind) InductiveSpecif.t) :
-      (('env, 'ind) exists, 'ind) Tuple.t =
+      (('env, 'ind, 'nrealargs) exists, 'ind) Tuple.t =
     let ind, _ = indf.def in
     let nb = Tuple.length (InductiveSpecif.constructors specif) in
     Tuple.init nb (fun i -> get env indf specif (Constructor.make ind i))
 
-  let concl_realargs (summary : ('env, 'ind, 'arity) t)
+  let build_dependent_constructor (cs : ('env, 'ind, 'nrealargs, 'arity) t) :
+      ('env * 'arity) Term.t =
+    Eq.(cast (sym (Refl ^-> Term.eq)))
+      Inductiveops.build_dependent_constructor cs.desc
 
   include Lift (struct
     module Phantom = struct
-      type nonrec ('env, 'ind, 'arity) t = ('env, 'ind, 'arity) t
+      type nonrec ('env, 'ind, 'nrealargs, 'arity) t =
+          ('env, 'ind, 'nrealargs, 'arity) t
     end
     module Concrete = struct
       type t = Inductiveops.constructor_summary
     end
-    let unsafe_map (type a b ind arity) f (summary : (a, ind, arity) t) :
-        (b, ind, arity) t =
-      let Exists result = unsafe_make (f summary.desc) summary.cstr in
+    let unsafe_map (type a b ind nrealargs arity) f
+        (summary : (a, ind, nrealargs, arity) t) :
+        (b, ind, nrealargs, arity) t =
+      let Exists result =
+        unsafe_make (f summary.desc) summary.nrealargs summary.cstr in
       match
         Nat.is_eq (RelContext.length result.args)
           (RelContext.length summary.args) with
@@ -1485,7 +1576,7 @@ module MeasurableVector (S : MeasurableS) = struct
     | hd :: tl -> Height.add (S.height hd) (height tl)
 
   module type ProjS = sig
-    module Type : BinaryTypeS
+    module Type : Type2S
 
     val proj : ('env, 'annot, 'height) S.t -> ('env, 'annot) Type.t
   end
@@ -1574,7 +1665,7 @@ module CasesPattern = struct
   type ('env, 'ind) desc =
     | Var
     | Cstr : {
-      cstr : ('env, 'ind, 'arity) ConstructorSummary.t;
+      cstr : ('env, 'ind, 'nrealargs, 'arity) ConstructorSummary.t;
       args : (Glob_term.cases_pattern, 'arity) Vector.t;
     } -> ('env, 'ind TomatchType.some) desc
 
@@ -1583,9 +1674,11 @@ module CasesPattern = struct
       desc : ('env, 'ind) desc;
     }
 
-  type ('env, 'ind) t = (('env, 'ind) content, [`any]) DAst.t
+  type ('env, 'ind) t =
+      (('env, 'ind) content, [`any]) DAst.t
 
-  let get_var (type ind) (pat : ('env, ind) t) : Names.Name.t option =
+  let get_var (type ind) (pat : ('env, ind) t) :
+      Names.Name.t option =
     let pat = DAst.get pat in
     match pat.desc with
     | Var -> Some pat.name
@@ -1594,12 +1687,14 @@ module CasesPattern = struct
   let get_name (pat : ('env, 'ind) t) : Names.Name.t =
     (DAst.get pat).name
 
-  let of_var (name : (Names.Name.t, [`any]) DAst.t) : ('env, 'ind) t =
+  let of_var (name : (Names.Name.t, [`any]) DAst.t) :
+      ('env, 'ind) t =
     DAst.map (fun name -> { name; desc = Var }) name
 
   let unsafe_of_cstr
       (env : 'env Env.t)
-      (cstrs : (('env, 'ind) ConstructorSummary.exists, 'ind) Tuple.t)
+      (cstrs :
+         (('env, 'ind, 'nrealargs) ConstructorSummary.exists, 'ind) Tuple.t)
       (pat : (_, [`any]) DAst.t) : ('env, 'ind TomatchType.some) t =
     let loc = pat.CAst.loc in
     pat |> DAst.map (fun (cstr, args, alias) ->
@@ -1649,12 +1744,13 @@ module CasesPattern = struct
             tgt_ind))
 
   type ('a, 'b) map = {
-      f : 'ind 'arity .
-        ('a, 'ind, 'arity) ConstructorSummary.t ->
-          ('b, 'ind, 'arity) ConstructorSummary.t
+      f : 'ind 'arity 'nrealargs .
+        ('a, 'ind, 'arity, 'nrealargs) ConstructorSummary.t ->
+          ('b, 'ind, 'arity, 'nrealargs) ConstructorSummary.t
     }
 
-  let map (type a b ind) f (t : (a, ind) t) : (b, ind) t =
+  let map (type a b ind nrealargs) f (t : (a, ind) t) :
+      (b, ind) t =
     t |> DAst.map (fun ({ name; desc } : (a, ind) content) ->
       let desc : (b, ind) desc =
         match desc with
@@ -1667,7 +1763,7 @@ module CasesPattern = struct
   let check
       (type env ind params nrealargs nrealdecls)
       (env : env Env.t)
-      (cstrs : ((env, ind) ConstructorSummary.exists, ind) Tuple.t)
+      (cstrs : ((env, ind, nrealargs) ConstructorSummary.exists, ind) Tuple.t)
       (ind_type : (env, ind, params, nrealargs, nrealdecls) InductiveType.t)
       (pat : Glob_term.cases_pattern) =
     match DAst.get pat with
@@ -1873,7 +1969,7 @@ module PrepareTomatch (MatchContext : MatchContextS) (EqnLength : Type) = struct
           env Env.t ->
           (pat_length, accu_length, EqnLength.t) Nat.plus ->
           (env, ind, params, nrealargs, nrealdecls) InductiveType.t ->
-          ((env, ind) ConstructorSummary.exists, ind) Tuple.t ->
+          ((env, ind, nrealargs) ConstructorSummary.exists, ind) Tuple.t ->
           (Glob_term.cases_pattern, pat_length) Vector.t ->
           ((env, ind TomatchType.some) CasesPattern.t, accu_length)
               Vector.t ->
@@ -1968,7 +2064,7 @@ module PrepareTomatch (MatchContext : MatchContextS) (EqnLength : Type) = struct
           let ty =
             InductiveFamily.build_dependent_inductive env
               inductive_type.family in
-          let return_pred_context : (_, _) ERelContext.t =
+          let return_pred_context : (_, _, _) ERelContext.t =
             EDeclaration.assum
               (Context.make_annot as_name Relevant) ty :: arity in
           let return_pred_height =
@@ -2011,7 +2107,8 @@ module PrepareTomatch (MatchContext : MatchContextS) (EqnLength : Type) = struct
 
     type ('env, 'return_pred_height) make_return_pred_context =
         Exists :
-          ('env, 'height) ERelContext.t * 'height Nat.t *
+          ('env, 'height, 'nb_args) ERelContext.t * 'height Nat.t *
+          'nb_args Nat.t *
           ('height Env.t, 'return_pred_height Env.t) Eq.t ->
             ('env, 'return_pred_height) make_return_pred_context
 
@@ -2022,19 +2119,21 @@ module PrepareTomatch (MatchContext : MatchContextS) (EqnLength : Type) = struct
             (env, return_pred_height) make_return_pred_context =
     fun env sigma tomatchl ->
       match tomatchl with
-      | [] -> Exists ([], Nat.O, Refl)
+      | [] -> Exists ([], Nat.O, Nat.O, Refl)
       | { tomatch = {
             return_pred_context = Exists (return_pred_context, eq_return);
             return_pred_height; _ }} :: tl ->
           let height = ERelContext.length return_pred_context in
-          let Exists (tl, length, eq_tl) =
+          let nb_args = ERelContext.nb_args return_pred_context in
+          let Exists (tl, length, nb_args', eq_tl) =
             make_return_pred_context env sigma tl in
           let Exists (sum, plus) = Nat.add height length in
+          let Exists (sum_nb, plus_nb) = Nat.add nb_args nb_args' in
           let context =
             ERelContext.push
               (ERelContext.lift (Height.of_nat length) return_pred_context) tl
-              plus in
-          Exists (context, sum, Eq.trans (Eq.sym (Env.plus plus))
+              plus plus_nb in
+          Exists (context, sum, sum_nb, Eq.trans (Eq.sym (Env.plus plus))
             (Env.morphism eq_return eq_tl))
       | _ -> .
 
@@ -2259,7 +2358,7 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
   let prepare_sub_tomatches
       (type env ind tail_length ind_tail eqn_length arity end_annot end_height)
       (env : env GlobalEnv.t)
-      (args : (env, arity) ERelContext.t)
+      (args : (env, arity, _) ERelContext.t)
       (clauses : ((env, arity, tail_length, ind_tail) prepare_clause,
         eqn_length) Vector.t) :
       (env, arity, eqn_length, end_annot, end_height) prepare_sub_tomatches
@@ -2295,25 +2394,26 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
         P.proj tomatches) in
     return (Exists { env; section; pats })
 
-  type ('env, 'ind, 'tail_length, 'ind_tail) branch_clauses =
+  type ('env, 'ind, 'nrealargs, 'tail_length, 'ind_tail) branch_clauses =
       Exists : {
-      summary : ('env, 'ind, 'arity) ConstructorSummary.t;
+      summary : ('env, 'ind, 'nrealargs, 'arity) ConstructorSummary.t;
       clauses : ('env, 'arity, 'tail_length, 'ind_tail) prepare_clause list;
-    } -> ('env, 'ind, 'tail_length, 'ind_tail) branch_clauses
+    } -> ('env, 'ind, 'nrealargs, 'tail_length, 'ind_tail) branch_clauses
 
   let compile_branch
-      (type env ind tail_length ind_tail eqns_length return_pred_height
-         tail_height)
-      (tomatch : (env, ind TomatchType.some, return_pred_height) Tomatch.t)
+      (type env ind params nrealargs nrealdecls tail_length ind_tail eqns_length
+        tail_height)
+      (tomatch : (env, ind TomatchType.some, nrealdecls Nat.succ) Tomatch.t)
+      (ind : (env, ind, params, nrealargs, nrealdecls) InductiveType.t)
       (tomatches : (env, tail_length, ind_tail, tail_height) TomatchVector.t)
       (problem :
          (env, tail_length Nat.succ, ind TomatchType.some * ind_tail,
-           eqns_length, return_pred_height * tail_height)
+           eqns_length, nrealdecls Nat.succ * tail_height)
          PatternMatchingProblem.t)
-      (return_pred : (env * return_pred_height) ETerm.t)
+      (return_pred : (env * nrealdecls Nat.succ) ETerm.t)
       (sub_return_pred : (env, tail_height) ReturnPred.t)
       (Exists { summary; clauses } :
-         (env, ind, tail_length, ind_tail) branch_clauses) :
+         (env, ind, nrealargs, tail_length, ind_tail) branch_clauses) :
       env ETerm.t EvarMapMonad.t =
     let open EvarMapMonad.Ops in
     let* sigma = EvarMapMonad.get in
@@ -2355,7 +2455,11 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
     let* judgment = MatchContext.compile_loop sub_problem in
     let return_pred =
       ETerm.liftn height tomatch.return_pred_height return_pred in
-    let return_pred_args = self :: branch_args in
+    let self =
+      ETerm.of_term (ConstructorSummary.build_dependent_constructor summary) in
+    let return_pred_args = Vector.(self :: summary.concl_realargs) in
+    let Refl =
+      Option.get (Nat.is_eq ind.family.nrealargs ind.family.nrealdecls) in
     let return_pred = ETerm.substl return_pred_args return_pred in
     let* judgment, _ =
       EJudgment.inh_conv_coerce_to ~program_mode:MatchContext.program_mode
@@ -2378,13 +2482,13 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
 
   let compile_destruct
       (type env ind params nrealargs nrealdecls tail_length ind_tail eqns_length
-        return_pred_height tail_height)
-      (tomatch : (env, ind TomatchType.some, return_pred_height) Tomatch.t)
+        tail_height)
+      (tomatch : (env, ind TomatchType.some, nrealdecls Nat.succ) Tomatch.t)
       (ind : (env, ind, params, nrealargs, nrealdecls) InductiveType.t)
       (tomatches : (env, tail_length, ind_tail, tail_height) TomatchVector.t)
       (problem :
         (env, tail_length Nat.succ, ind TomatchType.some * ind_tail,
-          eqns_length, return_pred_height * tail_height)
+          eqns_length, nrealdecls Nat.succ * tail_height)
             PatternMatchingProblem.t) :
       env EJudgment.t EvarMapMonad.t =
     let open Tuple.Ops in
@@ -2431,9 +2535,6 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
             return_pred_height = tail_height; })
       | Tycon tycon ->
           return (ReturnPred.Tycon tycon) in
-    let* branches =
-      branches |> EvarMapMonad.tuple_map
-        (compile_branch tomatch tomatches problem sub_return_pred) in
     let* return_pred =
       match problem.return_pred with
       | ReturnPred { return_pred; return_pred_height } ->
@@ -2452,6 +2553,10 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
           return (ETerm.lift tomatch.return_pred_height ty)
       | Tycon (Some tycon) ->
           return (ETerm.lift tomatch.return_pred_height tycon) in
+    let* branches =
+      branches |> EvarMapMonad.tuple_map
+        (compile_branch tomatch ind tomatches problem return_pred
+          sub_return_pred) in
     let case_type =
       let args = get_tomatch_args tomatch in
       ETerm.substl args return_pred in
@@ -2536,7 +2641,7 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
         return (tuple, pats)) tomatches in
     let* Exists tomatches = T.type_tomatches env tomatches in
     let* sigma = EvarMapMonad.get in
-    let Exists (return_pred_context, return_pred_height, eq_return_height) =
+    let Exists (return_pred_context, return_pred_height, _, eq_return_height) =
       T.PrepareTomatch.TomatchWithContextVector.make_return_pred_context
         (GlobalEnv.env env) sigma tomatches in
     let hypnaming = naming_of_program_mode MatchContext.program_mode in
