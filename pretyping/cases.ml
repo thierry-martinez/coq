@@ -750,12 +750,6 @@ module Vector = struct
       'b option =
     findi_aux O (length l) Zero_l f l
 
-  let find_name (to_name : 'a -> Names.Name.t) vars : Names.Name.t =
-    match find_opt (fun item ->
-      match to_name item with Anonymous -> None | name -> Some name) vars with
-    | None -> Anonymous
-    | Some name -> name
-
   let rec iter : type length . ('a -> unit) -> ('a, length) t -> unit =
   fun f l ->
     match l with
@@ -2524,6 +2518,30 @@ module AnnotatedVector = struct
       | [] -> []
       | hd :: tl -> f.f hd :: to_vector f tl
 
+    type ('a, 'annot_tail) exists_annot_item =
+        Exists : ('a, 'annot, 'annot_tail) S.t ->
+          ('a, 'annot_tail) exists_annot_item
+
+    type ('a, 'b, 'l) of_vectori = {
+        f : 'annot_tail . 'l Fin.t -> 'a -> ('b, 'annot_tail) exists_annot_item
+      }
+
+    let rec of_vectori_aux :
+    type i l l' . i Nat.t -> l' Nat.t -> (i, l', l) Nat.plus ->
+      ('a, 'b, l) of_vectori -> ('a, l') Vector.t -> ('b, l') exists_annot =
+    fun i l' diff f l ->
+      match l, l' with
+      | [], O -> Exists []
+      | hd :: tl, S l' ->
+          let Exists tl =
+            of_vectori_aux (S i) l' (Nat.move_succ_left diff) f tl in
+          let Exists hd = f.f (Exists diff) hd in
+          Exists (hd :: tl)
+
+    let of_vectori (type l) (f : ('a, 'b, l) of_vectori)
+        (l : ('a, l) Vector.t) : ('b, l) exists_annot =
+      of_vectori_aux O (Vector.length l) Zero_l f l
+
     let rec find_opt : type a env length annot end_annot .
         (env, a option) map -> (env, length, annot, end_annot) section ->
         a option =
@@ -4145,6 +4163,12 @@ module RhsArgsAnnotation = struct
   type 'env unit_annot = unit
 end
 
+type 'env simple_rhs = {
+  f : 'matches 'nrealdecls 'nrealargs .
+      ('env, 'matches, 'nrealdecls, 'nrealargs) RhsArgsAnnotation.args ->
+    ('env * 'nrealdecls) EJudgment.t EvarMapMonad.t }
+    [@@ocaml.unboxed]
+
 module RhsArgsVector = struct
   include AnnotatedVector.Make (RhsArgsAnnotation)
 end
@@ -4423,22 +4447,24 @@ module PrepareTomatch (MatchContext : MatchContextS) (EqnLength : Type) = struct
           Exists (I (hd, plus) :: tl)
 
     let to_clause (type env length height) (env : env GlobalEnv.t)
-        (v : (env, 'length, <ind: 'ind; size: height>) t)
+        (v : (env, length, <ind: 'ind; size: height>) t)
         (index : EqnLength.t Fin.t)
         (Exists { v = { ids; rhs; _ }; loc } :
           (env, length) Clause.untyped) :
-        (env, 'length, 'ind) Clause.exists =
+        (env, length, 'ind) Clause.exists =
       let Exists pats = proj_pats index v in
       let result = Clause.check ?loc { env; ids; pats; rhs } in
       Exists result
 
-    let to_clauses (type env length) (env : env GlobalEnv.t)
+    let to_clauses (type env length ind) (env : env GlobalEnv.t)
         (clauses : ((env, length) Clause.untyped,
           EqnLength.t) Vector.t)
-        (v : (env, length, <ind: 'ind; size: 'height>) t) :
-        ((env, length, 'ind) Clause.exists, EqnLength.t)
-          Vector.t =
-      Vector.mapi (fun index clause -> to_clause env v index clause) clauses
+        (v : (env, length, <ind: ind; size: 'height>) t) :
+        (<env: env; ind: ind; length: length>, EqnLength.t)
+          ClauseVector.exists_annot =
+      ClauseVector.of_vectori { f = fun index clause ->
+        let Exists clause = to_clause env v index clause in
+        Exists (I (C clause)) } clauses
 
     type ('env, 'length, 'end_annot) exists =
         Exists :
@@ -4984,8 +5010,8 @@ module type CompilerS = sig
   val compile_cases : generalize_return_pred:bool ->
       'env GlobalEnv.t -> 'env return_pred ->
       ('env TomatchTuple.t, 'tomatch_count) Vector.t ->
-      (('env, 'tomatch_count) Clause.untyped,
-        'eqns_length) Vector.t ->
+      (('env, 'tomatch_count) Clause.untyped, 'eqns_length) Vector.t ->
+      ('env simple_rhs, 'eqns_length) Vector.t ->
       'env EJudgment.t EvarMapMonad.t
 
   val compile_loop :
@@ -5043,6 +5069,16 @@ module PrepareClauseVector = struct
 
   include AnnotatedVector.Make (A)
 end
+
+let option_of_name (name : Names.Name.t) : Names.Id.t option =
+  match name with
+  | Anonymous -> None
+  | Name id -> Some id
+
+let name_of_option (opt : Names.Id.t option) : Names.Name.t =
+  match opt with
+  | None -> Anonymous
+  | Some id -> Name id
 
 module Make (MatchContext : MatchContextS) : CompilerS = struct
   let push_rel sigma decl env =
@@ -5231,7 +5267,7 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
     let return_pred =
       ReturnPred.apply (Vector.rev substl) tail_height problem.return_pred in
     let* sigma = EvarMapMonad.get in
-    let self_name = Vector.find_name Fun.id vars in
+    let self_name = name_of_option (Vector.find_opt option_of_name vars) in
     let _rel0, (_declaration, env) =
       push_local_name sigma self_name tomatch.judgment problem.env in
     let tomatches = TomatchVector.lift Height.one tail_tomatches in
@@ -5840,18 +5876,18 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
            branch_clauses) :
         env ETerm.t EvarMapMonad.t =
       let open EvarMapMonad.Ops in
-      let Exists clauses = Vector.of_list (List.rev clauses) in
       let args = ERelContext.of_rel_context summary.args in
       let names =
-        Vector.init summary.arity (fun i ->
-          Vector.find_name
-            (fun (Exists { v = clause } : _ prepare_clause) ->
+        Vector.init summary.arity (fun i -> name_of_option (
+          PrepareClauseVector.find_opt { f = fun (type annot annot_tail)
+            (I (Exists { v = clause }) : (_, annot, annot_tail)
+              PrepareClauseVector.A.t) ->
               let names =
                 clause.pats.args |> Pattern.to_vector |>
                 Vector.map (fun (Exists pat : Pattern.exists) ->
                   pat.v.name) in
-              Vector.Ops.(names.%(i)))
-            clauses) in
+              option_of_name (Vector.Ops.(names.%(i))) }
+            clauses)) in
       let args = ERelContext.set_names (Vector.rev names) args in
       let* args_env = push_rel_context_m (ERelContext.with_height args) env in
       let* sigma = EvarMapMonad.get in
@@ -5981,14 +6017,15 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
               tomatches;
               return_pred = ReturnPred.make return_pred return_pred_height;
               eqns = [
-                Clause.check { env = args_env; ids; pats = pats_ok;
-                  rhs = Rhs.make match_length.sum { f = make_body }; };
-                Clause.check { env = args_env; ids; pats = pats_reject;
-                  rhs = Rhs.make tomatch_length { f = make_idprop; }; }];
+                I (C (Clause.check { env = args_env; ids; pats = pats_ok;
+                  rhs = Rhs.make match_length.sum; }));
+                I (C (Clause.check { env = args_env; ids; pats = pats_reject;
+                  rhs = Rhs.make tomatch_length; })); ];
               previously_bounds = old_previously_bounds;
               expand_self = true;
             } in
-            let* body = MatchContext.compile_loop problem in
+            let* solution = MatchContext.compile_loop problem in
+
             return (EJudgment.uj_val body) in
       return (ERelContext.it_mkLambda_or_LetIn (ERelContext.with_height args)
         branch)
@@ -6277,11 +6314,9 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
 
   let compile_loop
       (type env tomatch_length ind eqns_length return_pred_height
-        previously_bounds)
-      (problem :
-         (env, tomatch_length, ind, eqns_length, return_pred_height,
-           previously_bounds) PatternMatchingProblem.t) :
-      env EJudgment.t EvarMapMonad.t =
+        previously_bounds matches) :
+      (env, tomatch_length, ind, eqns_length, return_pred_height,
+       previously_bounds, matches) compile_loop = fun problem ->
     match problem.tomatches with
     | [] ->
         begin match problem.eqns with
@@ -6349,10 +6384,15 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
     let* return_pred_env =
       push_rel_context_m (Exists return_pred_context.context) env in
     let* s = Evd.new_sort_variable Evd.univ_flexible in
-    let make_return_pred ({ globenv; context = context' } : _ Rhs.args) =
-      let env = GlobalEnv.env globenv in
+    let make_return_pred
+        ({ globenv; context = context' } :
+        (env * return_pred_height, _, _, _) RhsArgsAnnotation.args) =
+      let env_eq = Env.morphism Refl context.context.eq in
+      let env =
+        Eq.(cast (Env.morphism (sym env_eq) Refl)) (GlobalEnv.env globenv) in
       let Exists context' =
-        ERelContext.push context' context.context.context in
+        ERelContext.push (ERelContext.morphism (Eq.sym env_eq) context')
+          context.context.context in
       let* return_pred = return_pred.f context'.context in
       let return_pred = return_pred |>
         Eq.(cast (ETerm.morphism (
@@ -6370,8 +6410,9 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
         | SProp | Prop | Set -> EvarMapMonad.set_eq_sort env s' s
         | Type _ -> *) EvarMapMonad.set_leq_sort env s' s in
       let* sigma = EvarMapMonad.get in
-      return (EJudgment.of_term env sigma return_pred) in
-    let make_unit_rhs ({ globenv; _ } : _ Rhs.args) =
+      return (Eq.(cast (EJudgment.morphism (Env.morphism env_eq Refl)))
+        (EJudgment.of_term env sigma return_pred)) in
+    let make_unit_rhs ({ globenv; _ } : _ RhsArgsAnnotation.args) =
       let env = GlobalEnv.env globenv in
       let* unit_judgment = EJudgment.unit_m env in
       let* sigma = EvarMapMonad.get in
@@ -6384,15 +6425,18 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
           (Eq.cast (Height.morphism return_pred_context.context.eq)
             (Height.of_nat return_pred_context.length));
       eqns = [
-        Clause.check { env; ids; pats = pats_ok;
+        I (C (Clause.check { env; ids; pats = pats_ok;
           rhs = Rhs.morphism (Env.morphism Refl context.context.eq)
-            (Rhs.make binders_length { f = make_return_pred }); };
-        Clause.check { env; ids; pats = pats_reject;
-          rhs = Rhs.make tomatch_length { f = make_unit_rhs }; }];
+            (Rhs.make binders_length); }));
+        I (C (Clause.check { env; ids; pats = pats_reject;
+          rhs = Rhs.make tomatch_length; }))];
       previously_bounds = [];
       expand_self = true;
     } in
-    let* judgment = MatchContext.compile_loop problem in
+    let* solution = MatchContext.compile_loop problem in
+    let* judgment =
+      RhsTermVectorBuilder.build solution
+        [I { f = make_return_pred }; I { f = make_unit_rhs }] in
 (*
     let* sigma = EvarMapMonad.get in
     Format.eprintf "make inverted return pred: %a@." Pp.pp_with
@@ -6406,7 +6450,8 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
       (return_pred : env return_pred)
       (tomatches : (env TomatchTuple.t, tomatch_count) Vector.t)
       (eqns :
-         ((env, tomatch_count) Clause.untyped, eqns_length) Vector.t) :
+         ((env, tomatch_count) Clause.untyped, eqns_length) Vector.t)
+      (rhs : (env simple_rhs, eqns_length) Vector.t) :
       env EJudgment.t EvarMapMonad.t =
     let open EvarMapMonad.Ops in
     let module EqnLength = struct type t = eqns_length end in
@@ -6423,7 +6468,7 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
         return (tuple, Vector.map get_pats pats)) in
     let* Exists tomatches = T.type_tomatches env tomatches in
     let* sigma = EvarMapMonad.get in
-    let eqns =
+    let Exists eqns =
       T.PrepareTomatch.TomatchWithContextVector.to_clauses env eqns tomatches in
     let tomatches =
       T.PrepareTomatch.TomatchWithContextVector.to_tomatch_vector tomatches in
@@ -6460,9 +6505,22 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
     let return_pred =
       ReturnPred.make ~generalize:generalize_return_pred return_pred
         return_pred_height in
-    compile_loop
-      { env; tomatches; return_pred; eqns;
-        previously_bounds = []; expand_self = false; }
+    let* solution =
+      compile_loop
+        { env; tomatches; return_pred; eqns;
+          previously_bounds = []; expand_self = false; } in
+    let rec map_builder : type length annot.
+      (<env : env; ind : _; length : tomatch_count>, length, annot)
+        ClauseVector.t ->
+      (env simple_rhs, length) Vector.t ->
+      (env, length, annot) RhsTermVectorBuilder.t =
+    fun eqns rhs ->
+      match eqns, rhs with
+      | [], [] -> []
+      | I _ :: eqns, hd :: tl ->
+          I { f = fun args -> hd.f args } :: map_builder eqns tl in
+    let builder = map_builder eqns rhs in
+    RhsTermVectorBuilder.build solution builder
 end
 
 let compile_cases ?loc ~(program_mode : bool) (style : Constr.case_style)
@@ -6523,19 +6581,23 @@ let compile_cases ?loc ~(program_mode : bool) (style : Constr.case_style)
     let Exists pats = Pattern.args_of_concrete pats in
     let Refl = Option.get (Nat.is_eq tomatch_count (Pattern.length pats)) in
     let length = Pattern.size_of_args pats Nat.O in
-    let f ({ globenv; return_pred; _ } : _ Rhs.args) =
-      let* sigma = EvarMapMonad.get in
+    let desc : _ Clause.desc =
+      { env; ids = Names.Id.Set.of_list ids; pats;
+        rhs = Rhs.make length } in
+    Exists (CAst.make ?loc desc) in
+  let clauses = Vector.map (make_clause (Vector.length tomatches)) eqns in
+  let make_rhs ({ v = (ids, pats, rhs); loc } : Glob_term.cases_clause) :
+      'env simple_rhs =
+    let f ({ globenv; return_pred; _ } : _ RhsArgsAnnotation.args) =
 (*
+      let* sigma = EvarMapMonad.get in
       Format.eprintf "Typing rhs in %a (expected type: %a)." Pp.pp_with
         (Env.print (GlobalEnv.env globenv))
         Pp.pp_with (ETerm.print (GlobalEnv.env globenv) sigma return_pred);
 *)
       judgment_of_glob_constr ~tycon:return_pred globenv rhs in
-    let desc : _ Clause.desc =
-      { env; ids = Names.Id.Set.of_list ids; pats;
-        rhs = Rhs.make length { f }} in
-    Exists (CAst.make ?loc desc) in
-  let eqns = Vector.map (make_clause (Vector.length tomatches)) eqns in
+    { f } in
+  let rhs = Vector.map make_rhs eqns in
   let try_with ~small_inversion =
     let module Compiler = struct
       module rec Context : MatchContextS = struct
@@ -6548,7 +6610,7 @@ let compile_cases ?loc ~(program_mode : bool) (style : Constr.case_style)
       include Compiler
     end in
     Compiler.compile_cases ~generalize_return_pred:infer_return_pred env
-      { f = return_pred } tomatches eqns in
+      { f = return_pred } tomatches clauses rhs in
   let sigma, judgment =
     if infer_return_pred then
       try_with ~small_inversion:true sigma
