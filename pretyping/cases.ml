@@ -2560,6 +2560,10 @@ module AnnotatedVector = struct
         (v : (env, length, annot, end_annot) section) : bool =
       find_opt { f = fun x -> if f.f x then None else Some () } v = None
 
+    let iter (type env length annot end_annot) (f : (env, unit) map)
+        (v : (env, length, annot, end_annot) section) : unit =
+      ignore (find_opt { f = fun x -> f.f x; Some () } v)
+
     module UseMonad (M : Monad.S) = struct
       include UseMonad (M)
 
@@ -4251,6 +4255,10 @@ module PatternMatchingSolution = struct
         ('env, 'eqn_length, 'nrealdecls) RhsTermVectorVector.t
           -> 'env EJudgment.t EvarMapMonad.t;
     } -> ('env, 'eqn_length, 'matches) t
+
+  type ('env, 'eqn_length) exists = ExistsMatches :
+        ('env, 'eqn_length, 'matches) t -> ('env, 'eqn_length) exists
+            [@@ocaml.noalloc]
 end
 
 module RhsTermVectorBuilderAnnotation = struct
@@ -4305,38 +4313,26 @@ type ('env, 'length, 'ind, 'eqn_length, 'matches) remove_trailing_eqns =
     vector :
       (<env: 'env; length: 'length; ind: 'ind>, 'eqn_length0, 'matches0)
         ClauseVector.t;
-    promote : ('env, 'eqn_length0, 'matches0) PatternMatchingSolution.t ->
+    promote :
+      ('env, 'eqn_length0, 'matches0) PatternMatchingSolution.t ->
       ('env, 'eqn_length, 'matches) PatternMatchingSolution.t
   } -> ('env, 'length, 'ind, 'eqn_length, 'matches) remove_trailing_eqns
 
-let rec remove_trailing_eqns : type env length ind eqn_length annot .
+let remove_trailing_eqns : type env length ind eqn_length annot .
     (<env: env; length: length; ind: ind>, eqn_length, annot) ClauseVector.t ->
     (env, length, ind, eqn_length, annot) remove_trailing_eqns =
 fun eqns ->
   match eqns with
-  | [] -> Exists { vector = []; promote = Fun.id }
-  | I (C eqn) :: eqns ->
-      if Clause.is_catch_all eqn then
-        Exists {
-          vector = [I (C eqn)];
-          promote = fun (Exists solution) ->
-            let [I vector] = solution.spec in
-            let Exists spec_tail = RhsArgsVectorVector.make_empty eqns in
-            Exists { spec = I vector :: spec_tail;
-              build = fun (I terms :: _) -> solution.build [I terms]; }
-        }
-      else
-        let Exists tail = remove_trailing_eqns eqns in
-        Exists {
-          vector = I (C eqn) :: tail.vector;
-          promote = fun (Exists solution) ->
-            let I vector :: tail_spec = solution.spec in
-            let Exists { spec; build } =
-              tail.promote (Exists { spec = tail_spec; build }) in
-            Exists { spec = I vector :: spec;
-              build = fun (I terms :: tail_args) ->
-                solution.build (I terms :: tail_args) }
-        }
+  | I (C eqn) :: tail when Clause.is_catch_all eqn ->
+      Exists {
+        vector = [I (C eqn)];
+        promote = fun (Exists solution) ->
+          let I vector :: [] = solution.spec in
+          let Exists spec_tail = RhsArgsVectorVector.make_empty tail in
+          Exists { spec = I vector :: spec_tail;
+            build = fun (I terms :: _) -> solution.build [I terms]; }
+      }
+  | _ -> Exists { vector = eqns; promote = Fun.id }
 
 module type MatchContextS = sig
   val style : Constr.case_style
@@ -5076,12 +5072,12 @@ module type CompilerS = sig
   val compile_cases : generalize_return_pred:bool ->
       'env GlobalEnv.t -> 'env return_pred ->
       ('env TomatchTuple.t, 'tomatch_count) Vector.t ->
-      (('env, 'tomatch_count) Clause.untyped, 'eqns_length) Vector.t ->
-      ('env simple_rhs, 'eqns_length) Vector.t ->
+      (('env, 'tomatch_count) Clause.untyped, 'eqn_length) Vector.t ->
+      ('env simple_rhs, 'eqn_length) Vector.t ->
       'env EJudgment.t EvarMapMonad.t
 
   val compile_loop :
-      ('env, 'tomatch_length, 'tomatch_ind, 'eqns_length, 'return_pred_height,
+      ('env, 'tomatch_length, 'tomatch_ind, 'eqn_length, 'return_pred_height,
         'previously_bounds, 'matches) compile_loop
 end
 
@@ -5302,13 +5298,11 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
             map_spec
 
   let compile_case_trivial
-      (type env ind tail_length ind_tail section_length eqns_length
+      (type env ind tail_length ind_tail section_length eqn_length
         return_pred_height tail_height previously_bounds matches end_matches)
       (tomatch : (env, ind, return_pred_height) Tomatch.t)
-      (vars : (Names.Name.t, section_length) Vector.t)
-      (section : (<env: env; ind: ind * ind_tail; length: tail_length Nat.succ>,
-         section_length, matches, end_matches) ClauseVector.section) :
-         (env, tail_length Nat.succ, ind * ind_tail, eqns_length,
+      (vars : (Names.Name.t, section_length) Vector.t) :
+         (env, tail_length Nat.succ, ind * ind_tail, eqn_length,
            return_pred_height * tail_height, previously_bounds, matches)
       compile_loop = fun problem ->
     let open EvarMapMonad.Ops in
@@ -5352,7 +5346,7 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
       return (ClauseVector.A.I (C
         (CAst.make ?loc Clause.{ env; ids = v.ids; pats; rhs }))) in
     let module Map = ClauseVector.UseMonad (Accu) in
-    let eqns, rels = Map.map { f = make_eqn } section in
+    let eqns, rels = Map.map { f = make_eqn } problem.eqns in
     let rel =
       match rels with
       | rel :: _ -> rel
@@ -5613,7 +5607,7 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
     open Case
 
     let compile_branch_body
-        (type height args refine_patterns eqns_length tail_length ind_tail
+        (type height args refine_patterns eqn_length tail_length ind_tail
           patterns_height generalized_height tail_height nrealdecls'
           nrealargs' old_previously_bounds new_previously_bounds
           generalize_count refine_tomatches matches)
@@ -5626,7 +5620,7 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
         (args : (env, height, args) ERelContext.t)
         (clauses :
            (<env: env; arity: height; tail_length: tail_length;
-              ind_tail: ind_tail>, eqns_length, matches)
+              ind_tail: ind_tail>, eqn_length, matches)
            PrepareClauseVector.t)
         (generalize_context :
           (env, patterns_height, generalize_count, generalized_height)
@@ -5649,7 +5643,7 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
         (tail_tomatches :
           (env * height, tail_length, <ind: ind_tail; size: tail_height>)
             TomatchVector.t) :
-        (Case.env, eqns_length, matches) PatternMatchingSolution.t
+        (Case.env, eqn_length, matches) PatternMatchingSolution.t
         EvarMapMonad.t =
       let open EvarMapMonad.Ops in
       let subcontext =
@@ -6086,16 +6080,18 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
       return (ERelContext.it_mkLambda_or_LetIn (ERelContext.with_height args)
         branch)
 
-    type ('env, 'ind, 'nrealdecls, 'tail_height) compile_branches = {
-        branches : ('env ETerm.t, 'ind) Tuple.t;
+    type ('env, 'eqn_length, 'ind, 'nrealdecls, 'tail_height)
+          compile_branches = {
+        branches :
+          (('env, 'eqn_length) PatternMatchingSolution.exists, 'ind) Tuple.t;
         return_pred :
           (('env * 'nrealdecls Nat.succ) * 'tail_height) ETerm.t;
         apply : 'env ETerm.t Vector.exists;
       }
 
     let compile_branches
-        (type params tail_length ind_tail
-          tail_height previously_bounds)
+        (type params eqn_length tail_length ind_tail tail_height
+           previously_bounds)
         (tomatch_type :
           (env, ind, params, nrealargs, nrealdecls) TomatchType.desc)
         (tomatch_vector : (env EJudgment.t, tail_length) Vector.t)
@@ -6106,10 +6102,11 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
                size: nrealdecls Nat.succ * tail_height>)
            TomatchVector.t)
         (branches :
-           ((env, ind, nrealargs, tail_length, ind_tail)
+           ((env, eqn_length, ind, nrealargs, tail_length, ind_tail)
              branch_clauses, ind) Tuple.t)
         (previously_bounds : (env Rel.t, previously_bounds) Vector.t) :
-        (env, ind, nrealdecls, tail_height) compile_branches EvarMapMonad.t =
+        (env, eqn_length, ind, nrealdecls, tail_height) compile_branches
+          EvarMapMonad.t =
       let open EvarMapMonad.Ops in
       let* sigma = EvarMapMonad.get in
       let Exists arity_patterns = tomatch_type.pattern_structure in
@@ -6230,16 +6227,17 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
   end
 
   let compile_destruct
-      (type env ind params nrealargs nrealdecls tail_length ind_tail eqns_length
-        tail_height previously_bounds)
+      (type env ind params nrealargs nrealdecls tail_length ind_tail eqn_length
+        tail_height previously_bounds matches)
       (tomatch : (env, ind TomatchType.some, nrealdecls Nat.succ) Tomatch.t)
       (tomatch_type :
         (env, ind, params, nrealargs, nrealdecls) TomatchType.desc)
       (problem :
         (env, tail_length Nat.succ, ind TomatchType.some * ind_tail,
-          eqns_length, nrealdecls Nat.succ * tail_height,
-          previously_bounds) PatternMatchingProblem.t) :
-      env EJudgment.t EvarMapMonad.t =
+          eqn_length, nrealdecls Nat.succ * tail_height,
+          previously_bounds, matches) PatternMatchingProblem.t) :
+      (env, eqn_length, matches)
+          PatternMatchingSolution.t EvarMapMonad.t =
     let open Tuple.Ops in
     let open EvarMapMonad.Ops in
     let env = GlobalEnv.env problem.env in
@@ -6254,8 +6252,10 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
     let branches = Tuple.init nb_cstr (fun i ->
       let Exists summary = constructor_summaries.%(i) in
       Exists { summary; clauses = [] }) in
-    let add_eqn (Exists { v = clause; loc } :
-        (env, tail_length Nat.succ, ind TomatchType.some * ind_tail) Clause.t) =
+    let add_eqn (type annot annot_tail) (I (C { v = clause; loc }) :
+        (<env: env; length: tail_length Nat.succ;
+           ind: ind TomatchType.some * ind_tail>, annot, annot_tail)
+          ClauseVector.A.t) =
       let I (pat, plus) :: tail = clause.pats in
       match pat.v.desc with
       | Var ->
@@ -6271,7 +6271,7 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
             let Succ_plus plus' = Nat.move_succ_left n in
             let Refl = Nat.plus_fun args_plus plus' in
             branches.%(i) <-
-              Exists { summary; clauses = Exists clause :: clauses })
+              Exists { summary; clauses = I (Exists clause) :: clauses })
       | Cstr { cstr; args } ->
           let i = Constructor.index cstr.cstr in
           let Exists { summary; clauses } = branches.%(i) in
@@ -6285,8 +6285,8 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
           let Succ_plus plus' = plus in
           let Refl = Nat.plus_fun diff_b plus' in
           branches.%(i) <-
-            Exists { summary; clauses = Exists clause :: clauses } in
-    Vector.iter add_eqn problem.eqns;
+            Exists { summary; clauses = I (Exists clause) :: clauses } in
+    ClauseVector.iter { f = add_eqn } problem.eqns;
     let tail_tomatches = TomatchVector.tl problem.tomatches in
     let tomatch_vector =
       let f (type a b) (I tomatch : (_, a, b) TomatchVector.A.t) =
@@ -6349,32 +6349,35 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
          PatternMatchingProblem.t) :
       (env, eqn_length, matches)
         PatternMatchingSolution.t EvarMapMonad.t =
-    let Exists { vector = eqns; plus } =
-      ClauseVector.remove_trailing_eqns problem.eqns in
+    let Exists { vector = eqns; promote } =
+      remove_trailing_eqns problem.eqns in
     let problem = { problem with eqns } in
     let module V = ClauseVector.UseMonad (Monad.Option) in
-    match
-      V.to_vector { f = fun (type annot annot_tail) (I (C clause) :
-        (_, annot, annot_tail) ClauseVector.A.t) ->
-          Clause.extract_pat_var clause }
-        eqns, eqns,
-      tomatch.inductive_type
-    with
-    | None, _, Some _
-    | Some _, [], Some _ ->
-        begin match tomatch.inductive_type with
-        | None -> assert false
-        | Some desc -> compile_destruct tomatch desc problem
-        end
-    | Some vars, _, _ ->
-        compile_case_trivial tomatch vars problem
-    | None, _, None ->
-        assert false
+    let open EvarMapMonad.Ops in
+    let* solution =
+      match
+        V.to_vector { f = fun (type annot annot_tail) (I (C clause) :
+          (_, annot, annot_tail) ClauseVector.A.t) ->
+            Clause.extract_pat_var clause }
+          eqns, eqns,
+        tomatch.inductive_type
+      with
+      | None, _, Some _
+      | Some _, [], Some _ ->
+          begin match tomatch.inductive_type with
+          | None -> assert false
+          | Some desc -> compile_destruct tomatch desc problem
+          end
+      | Some vars, _, _ ->
+          compile_case_trivial tomatch vars problem
+      | None, _, None ->
+          assert false in
+    return (promote solution)
 
   let compile_loop
-      (type env tomatch_length ind eqns_length return_pred_height
+      (type env tomatch_length ind eqn_length return_pred_height
         previously_bounds matches) :
-      (env, tomatch_length, ind, eqns_length, return_pred_height,
+      (env, tomatch_length, ind, eqn_length, return_pred_height,
        previously_bounds, matches) compile_loop = fun problem ->
     match problem.tomatches with
     | [] ->
@@ -6503,17 +6506,17 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
 *)
     return (EJudgment.uj_val judgment)
 
-  let compile_cases (type env tomatch_count eqns_length)
+  let compile_cases (type env tomatch_count eqn_length)
       ~(generalize_return_pred : bool)
       (env : env GlobalEnv.t)
       (return_pred : env return_pred)
       (tomatches : (env TomatchTuple.t, tomatch_count) Vector.t)
       (eqns :
-         ((env, tomatch_count) Clause.untyped, eqns_length) Vector.t)
-      (rhs : (env simple_rhs, eqns_length) Vector.t) :
+         ((env, tomatch_count) Clause.untyped, eqn_length) Vector.t)
+      (rhs : (env simple_rhs, eqn_length) Vector.t) :
       env EJudgment.t EvarMapMonad.t =
     let open EvarMapMonad.Ops in
-    let module EqnLength = struct type t = eqns_length end in
+    let module EqnLength = struct type t = eqn_length end in
     let module T = TypeTomatch (EqnLength) in
     let pats = eqns |> Vector.map (
     fun (Exists eqn : (env, tomatch_count) Clause.untyped) :
@@ -6789,3 +6792,89 @@ match n, v with
 | S n, cons _ _ => foo
 end
 *)
+
+(*
+Hu
+Hugo Herbelin
+1:01 PM
+a::b::c::_ -> [a;b;c]
+
+Hu
+Hugo Herbelin
+1:15 PM
+match t as x in I pats(us) generalize gamma return P with C pats(ys) => rhs end
+
+Hu
+Hugo Herbelin
+1:17 PM
+match t as x in I zs return match zs with pats(z's) => forall gamma, P | _ => IDProp end with C y's => match y's with pats(ys) => rhs | _ => idProp end end
+
+Hu
+Hugo Herbelin
+1:17 PM
+match t as x in I pats(z's) generalize gamma return P with C pats(ys) => rhs end
+
+Hu
+Hugo Herbelin
+1:18 PM
+match t as x in I zs return match zs with pats(z's) => forall gamma, P | _ => IDProp end with C y's => match y's with pats(ys) => fun gamma -> rhs | _ => idProp end end gamma
+
+Welcome to Discussion!
+
+For help on using BigBlueButton see these (short) tutorial videos.
+
+To join the audio bridge click the phone button. Use a headset to avoid causing background noise for others.
+
+This server is running BigBlueButton.
+
+Hu
+Hugo Herbelin
+1:19 PM
+match t as x in I zs return match zs with pats(z's) => forall gamma, P | _ => IDProp end
+with C y's => match y's with pats(ys) => fun gamma -> rhs | _ => idProp end
+end gamma
+
+Hu
+Hugo Herbelin
+1:22 PM
+match t as x in I pats(z's) generalize gamma return P with C pats'(ys) => rhs end
+
+Hu
+Hugo Herbelin
+1:24 PM
+nat_rec / fix
+
+Hu
+Hugo Herbelin
+1:29 PM
+match t as x in I pats(us as z's) generalize gamma return P with C pats'(ys) => [us=vs(ys)] rhs end
+
+Hu
+Hugo Herbelin
+1:30 PM
+avec C pat's(ys) : I pats(vs(ys))
+*)
+
+
+(*
+match t as x in I pats(xs)
+                generalizing gamma : Gamma
+                return P(xs,x,gamma)
+with
+| C pats'(ys) => t
+end
+
+match t as x in I xs' return
+     match xs' with
+     | pats(xs) =>
+                forall gamma : Gamma(xs,s),
+                P(xs,x,gamma)
+     | _ => IDProp
+with
+| C ys' => match ys' with
+       | pats'(ys) => fun gamma => t
+       | _ => idProp
+| D _ => idProp
+end gamma
+*)
+x

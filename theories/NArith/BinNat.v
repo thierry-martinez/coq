@@ -240,6 +240,8 @@ Qed.
 
 (** Specification of addition *)
 
+Print "+".
+
 Theorem add_0_l n : 0 + n = n.
 Proof.
 reflexivity.
