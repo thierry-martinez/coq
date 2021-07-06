@@ -5594,13 +5594,13 @@ module Make (MatchContext : MatchContextS) : CompilerS = struct
         (fun index -> V.proj_pats index tomatches) in
     return (Exists { section; pats })
 
-  type ('env, 'ind, 'nrealargs, 'tail_length, 'ind_tail)
+  type ('env, 'eqn_length, 'ind, 'nrealargs, 'tail_length, 'ind_tail)
         branch_clauses = Exists : {
       summary : ('env, 'ind, 'nrealargs, 'arity, 'args) ConstructorSummary.t;
       clauses : (<env: 'env; arity: 'arity; tail_length: 'tail_length;
-        ind_tail: 'ind_tail>, 'clause_length, 'matches)
+        ind_tail: 'ind_tail>, 'eqn_length, 'matches)
         PrepareClauseVector.t;
-    } -> ('env, 'ind, 'nrealargs, 'tail_length, 'ind_tail)
+    } -> ('env, 'eqn_length, 'ind, 'nrealargs, 'tail_length, 'ind_tail)
         branch_clauses
 
   module CompileCase (Case : CompileCaseS) = struct
